@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Terminator (thread mode)",
+      "type": "cppdbg", "request": "launch",
+      "program": "${workspaceFolder}/terminator",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [{ "name": "DISPLAY", "value": "${env:DISPLAY}" }],
+      "MIMode": "gdb",
+      "preLaunchTask": "make",
+      "setupCommands": [
+        { "text": "-enable-pretty-printing", "ignoreFailures": true },
+        { "text": "handle SIGPIPE nostop noprint pass" },
+        { "text": "set follow-fork-mode parent" },
+        { "text": "set detach-on-fork on" }
+      ]
+    },
+    {
+      "name": "Terminator (process mode)",
+      "type": "cppdbg", "request": "launch",
+      "program": "${workspaceFolder}/terminator",
+      "args": ["useProcess=True"],
+      "cwd": "${workspaceFolder}",
+      "environment": [{ "name": "DISPLAY", "value": "${env:DISPLAY}" }],
+      "MIMode": "gdb",
+      "preLaunchTask": "make",
+      "setupCommands": [
+        { "text": "handle SIGPIPE nostop noprint pass" },
+        { "text": "set follow-fork-mode parent" },
+        { "text": "set detach-on-fork on" }
+      ]
+    },
+    {
+      "name": "Attach to a tab process",
+      "type": "cppdbg", "request": "attach",
+      "program": "${workspaceFolder}/terminator",
+      "processId": "${command:pickProcess}",
+      "MIMode": "gdb"
+    }
+  ]
+}

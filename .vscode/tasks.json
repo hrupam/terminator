@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "make", "type": "shell", "command": "make",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"] },
+    { "label": "clean", "type": "shell", "command": "make clean" },
+    { "label": "strace", "type": "shell", "dependsOn": "make",
+      "command": "strace -f -o /tmp/strace.txt -e trace=process,pipe2,dup2,close,kill ./terminator" },
+    { "label": "valgrind fds", "type": "shell", "dependsOn": "make",
+      "command": "valgrind --track-fds=yes --leak-check=full --log-file=/tmp/vg.txt ./terminator" }
+  ]
+}

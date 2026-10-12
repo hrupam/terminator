@@ -1,0 +1,18 @@
+terminator/
+  Makefile
+  README.md
+  DESIGN.md
+  src/
+    main.c        start-up, mode selection
+    gui.c gui.h   X11 window, event loop, drawing, tabs
+    keys.c        hotkey table, ~/.terminatorrc
+    tab.c tab.h   creating tabs (thread or process), the pipes
+    shell.c shell.h  engine state, run one line, built-ins
+    lex.c         quotes, expansion, $(...)
+    exec.c        fork/exec, redirection, pipelines
+    jobs.c        job table, fg, bg, jobs
+    history.c     shared history, Ctrl+R search
+    complete.c    file-name completion
+    multiwatch.c  multiWatch
+    script.c      script interpreter, [ ] tests
+  tests/          small scripts and input files
