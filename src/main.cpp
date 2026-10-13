@@ -1,6 +1,9 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <bits/stdc++.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include "string_helper.h"
 
 using namespace std;
 
@@ -19,6 +22,24 @@ public:
     {
         input.insert(cursor, s);
         cursor += s.length();
+    }
+
+    void appendOutput(const string &data)
+    {
+        for (char c : data)
+        {
+            if (c == '\n')
+            {
+                lines.push_back(partial);
+                partial.clear();
+            }
+            else if (c == '\t')
+                do
+                    partial += ' ';
+                while (partial.size() % 8);
+            else if ((unsigned char)c >= 32)
+                partial += c;
+        }
     }
 };
 
@@ -76,6 +97,71 @@ void redraw(void)
     }
 }
 
+void runCommand(const string &str)
+{
+    string cmd = processCommand(str);
+    if (cmd.empty())
+        return;
+    stringstream ss(cmd);
+    vector<string> words;
+    for (string token; ss >> token;)
+        words.push_back(token);
+
+    vector<char *> argv;
+    for (string &w : words)
+        argv.push_back(w.data());
+    argv.push_back(nullptr);
+    string notFound = "terminator: " + words[0] + ": command not found\n";
+
+    int pipefd[2]; // pipefd[0] - read end, pipefd[1] - write end
+    int pipeStatus = pipe(pipefd);
+    if (pipeStatus < 0)
+    {
+        perror("pipe error");
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        perror("fork error");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (pid == 0)
+    {
+        // child
+        close(pipefd[0]); // close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]); // close write end after dup2
+        execvp(argv[0], argv.data());
+
+        write(STDERR_FILENO, notFound.c_str(), notFound.size());
+        _exit(127);
+    }
+    else
+    {
+        // parent
+        close(pipefd[1]); // close write end
+        char buffer[4096];
+        ssize_t n;
+        while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0)
+            termState.appendOutput(string(buffer, n));
+
+        close(pipefd[0]);
+        int status;
+        waitpid(pid, &status, 0);
+        if (!termState.partial.empty()) // output without a final \n
+        {
+            termState.lines.push_back(termState.partial);
+            termState.partial.clear();
+        }
+    }
+}
+
 int main(void)
 {
     disp = XOpenDisplay(NULL);
@@ -126,7 +212,7 @@ int main(void)
             {
             case XK_Return:
                 termState.lines.push_back(termState.prompt + termState.input);
-                termState.lines.push_back("You typed: " + termState.input);
+                runCommand(termState.input);
                 termState.input.clear();
                 termState.cursor = 0;
                 termState.scroll = 0;
