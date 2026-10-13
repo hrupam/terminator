@@ -1,13 +1,13 @@
-CC      = gcc
-CFLAGS  = -Wall -Wextra -g -std=gnu11 -pthread
+CC      = g++
+CFLAGS  = -Wall -Wextra -g -std=c++17 -pthread
 LDLIBS  = -lX11 -pthread -lrt
-SRC     = $(wildcard src/*.c)
-OBJ     = $(SRC:.c=.o)
+SRC     = $(wildcard src/*.cpp)
+OBJ     = $(SRC:.cpp=.o)
 
 terminator: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-src/%.o: src/%.c $(wildcard src/*.h)
+src/%.o: src/%.cpp $(wildcard src/*.h)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
