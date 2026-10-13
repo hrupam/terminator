@@ -42,7 +42,21 @@ void redraw(void)
     int total = termState.lines.size() + 1;      // +1 for the prompt line
     int first = total > rows ? total - rows : 0; // first line that fits
 
-    for (int v = first; v < total; v++)
+    // scroll
+    int maxScroll = total - rows; // how far up you can go
+    if (maxScroll < 0)
+        maxScroll = 0;
+    if (termState.scroll > maxScroll)
+        termState.scroll = maxScroll;
+    if (termState.scroll < 0)
+        termState.scroll = 0;
+
+    first -= termState.scroll;
+    int last = first + rows; // draw rows lines, not up to total
+    if (last > total)
+        last = total;
+
+    for (int v = first; v < last; v++)
     {
         int y = (v - first) * lineHeight + font->ascent;
 
@@ -115,6 +129,7 @@ int main(void)
                 termState.lines.push_back("You typed: " + termState.input);
                 termState.input.clear();
                 termState.cursor = 0;
+                termState.scroll = 0;
                 break;
 
             case XK_BackSpace:
@@ -139,11 +154,23 @@ int main(void)
                 }
                 break;
 
+            case XK_Prior: // Page Up
+                if (ev.xkey.state & ShiftMask)
+                    termState.scroll += 10;
+                break;
+            case XK_Next: // Page Down
+                if (ev.xkey.state & ShiftMask)
+                    termState.scroll -= 10;
+                break;
+
             default:
 
                 if (len == 1 && (unsigned char)buf[0] >= 32 &&
                     !(ev.xkey.state & (ControlMask | Mod1Mask)))
+                {
+                    termState.scroll = 0;
                     termState.appendInput(buf);
+                }
             }
             redraw();
         }
@@ -155,6 +182,14 @@ int main(void)
         {
             width = ev.xconfigure.width;
             height = ev.xconfigure.height;
+            redraw();
+        }
+        else if (ev.type == ButtonPress)
+        {
+            if (ev.xbutton.button == 4)
+                termState.scroll += 3; // wheel up
+            if (ev.xbutton.button == 5)
+                termState.scroll -= 3; // wheel down
             redraw();
         }
     }
