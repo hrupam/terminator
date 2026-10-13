@@ -26,6 +26,7 @@ Display *disp;
 Window win;
 GC gc;
 XFontStruct *font;
+unsigned int width = 800, height = 600;
 
 TerminalState termState;
 
@@ -33,22 +34,32 @@ void redraw(void)
 {
     XClearWindow(disp, win);
     int lineHeight = font->ascent + font->descent;
-    int row = 0;
-    for (const string &line : termState.lines)
-    {
-        XDrawString(disp, win, gc, 4, row * lineHeight + font->ascent, line.c_str(), line.length());
-        row++;
-    }
-    string displayText = termState.prompt + termState.input;
-
-    int y = row * lineHeight + font->ascent;
-
-    XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
-
-    // Draw the cursor
     int charw = font->max_bounds.width;
-    int col = termState.prompt.size() + termState.cursor;
-    XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
+
+    int rows = height / lineHeight; // how many lines fit
+    if (rows < 1)
+        rows = 1;
+    int total = termState.lines.size() + 1;      // +1 for the prompt line
+    int first = total > rows ? total - rows : 0; // first line that fits
+
+    for (int v = first; v < total; v++)
+    {
+        int y = (v - first) * lineHeight + font->ascent;
+
+        if (v < (int)termState.lines.size()) // an output line
+        {
+            const string &line = termState.lines[v];
+            XDrawString(disp, win, gc, 4, y, line.c_str(), line.length());
+        }
+        else // the prompt line
+        {
+            string displayText = termState.prompt + termState.input;
+            XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
+
+            int col = termState.prompt.size() + termState.cursor;
+            XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
+        }
+    }
 }
 
 int main(void)
@@ -63,7 +74,7 @@ int main(void)
     int scr = DefaultScreen(disp);
     Window rootWin = RootWindow(disp, scr);
     int x = 0, y = 0;
-    unsigned int width = 800, height = 600, border_width = 1;
+    unsigned int border_width = 1;
     unsigned long border = WhitePixel(disp, scr);
     unsigned long background = BlackPixel(disp, scr);
 
@@ -139,6 +150,12 @@ int main(void)
         else if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == wmDeleteMessage)
         {
             break;
+        }
+        else if (ev.type == ConfigureNotify)
+        {
+            width = ev.xconfigure.width;
+            height = ev.xconfigure.height;
+            redraw();
         }
     }
 
