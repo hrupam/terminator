@@ -12,14 +12,15 @@ using namespace std;
 class TerminalState
 {
 public:
-    vector<string> lines; /* finished output lines */
-    string partial;       /* output line still being written (no \n yet) */
-    string input;         /* the line being typed */
-    int cursor = 0;       /* length and cursor position in input */
-    int scroll = 0;       /* how many lines scrolled back, 0 = bottom */
-    string prompt;        /* "user@terminator> " or "> " */
-    string cwd;           /* shell's current directory */
-    int lastStatus = 0;   /* $? : exit status of the last command */
+    vector<string> lines;  /* finished output lines */
+    string partial;        /* output line still being written (no \n yet) */
+    string input;          /* the line being typed */
+    int cursor = 0;        /* length and cursor position in input */
+    int scroll = 0;        /* how many lines scrolled back, 0 = bottom */
+    string prompt;         /* "user@terminator> " or "> " */
+    string cwd;            /* shell's current directory */
+    int lastStatus = 0;    /* $? : exit status of the last command */
+    bool isRunning = true; /* running state of the terminal */
 
 public:
     void appendInput(const string &s)
@@ -45,13 +46,26 @@ public:
                 partial += c;
         }
     }
+
+    void setPrompt()
+    {
+        string cwdPath = this->cwd;
+        string homePath = getenv("HOME");
+        string pathText = cwdPath;
+        if (startsWith(cwdPath, homePath))
+        {
+            pathText = "~" + cwdPath.substr(homePath.length());
+        }
+        string promptText = "rupam@terminator: " + pathText + "> ";
+        this->prompt = promptText;
+    }
 };
 
 Display *disp;
 Window win;
 GC gc;
 XFontStruct *font;
-unsigned int width = 800, height = 600;
+unsigned int width = 1200, height = 800;
 
 TerminalState termState;
 
@@ -99,6 +113,13 @@ void redraw(void)
             XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
         }
     }
+}
+
+void closeTerminal()
+{
+    XFreeFont(disp, font);
+    XFreeGC(disp, gc);
+    XCloseDisplay(disp);
 }
 
 int builtinCd(vector<string> &words)
@@ -151,6 +172,7 @@ int builtinCd(vector<string> &words)
         return 1;
     }
     termState.cwd = resolvedPath;
+    termState.setPrompt();
 
     return 0;
 }
@@ -158,12 +180,26 @@ int builtinCd(vector<string> &words)
 void runCommand(const string &str)
 {
     string cmd = processCommand(str);
+
     if (cmd.empty())
         return;
+
     stringstream ss(cmd);
     vector<string> words;
     for (string token; ss >> token;)
         words.push_back(token);
+
+    for (string &w : words)
+    {
+        if (w == "$?")
+            w = to_string(termState.lastStatus);
+    }
+
+    if (words[0] == "exit")
+    {
+        termState.isRunning = false;
+        return;
+    }
 
     if (words[0] == "cd")
     {
@@ -175,6 +211,7 @@ void runCommand(const string &str)
     for (string &w : words)
         argv.push_back(w.data());
     argv.push_back(nullptr);
+
     string cmdNotFound = "terminator: " + words[0] + ": command not found\n";
     string badDir = "terminator: cannot enter " + termState.cwd + "\n";
 
@@ -182,6 +219,7 @@ void runCommand(const string &str)
     int pipeStatus = pipe(pipefd);
     if (pipeStatus < 0)
     {
+        termState.lastStatus = 1;
         perror("pipe error");
         return;
     }
@@ -189,6 +227,7 @@ void runCommand(const string &str)
     pid_t pid = fork(); // in parent - pid is child's pid, in child - pid is 0
     if (pid < 0)
     {
+        termState.lastStatus = 1;
         perror("fork error");
         close(pipefd[0]);
         close(pipefd[1]);
@@ -225,6 +264,12 @@ void runCommand(const string &str)
         close(pipefd[0]);
         int status;
         waitpid(pid, &status, 0);
+        if (WIFEXITED(status))
+
+            termState.lastStatus = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status))
+            termState.lastStatus = 128 + WTERMSIG(status);
+
         if (!termState.partial.empty()) // output without a final \n
         {
             termState.lines.push_back(termState.partial);
@@ -257,19 +302,33 @@ int main(void)
     Atom wmDeleteMessage = XInternAtom(disp, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(disp, win, &wmDeleteMessage, 1);
 
-    font = XLoadQueryFont(disp, "fixed");
+    const char *fontNames[] = {"12x24", "10x20", "9x15", "fixed"};
+    font = nullptr;
+    for (const char *name : fontNames)
+    {
+        font = XLoadQueryFont(disp, name);
+        if (font)
+            break;
+    }
+    if (!font)
+    {
+        fprintf(stderr, "Unable to load any font\n");
+        return 1;
+    }
+
     gc = XCreateGC(disp, win, 0, NULL);
     XSetForeground(disp, gc, WhitePixel(disp, scr));
     XSetFont(disp, gc, font->fid);
 
     XMapWindow(disp, win);
 
-    termState.prompt = "rupam@terminator> ";
-    char buf[PATH_MAX];
-    if (getcwd(buf, sizeof(buf)))
-        termState.cwd = buf;
+    // getting initial working directory
+    char cwdbuf[PATH_MAX];
+    if (getcwd(cwdbuf, sizeof(cwdbuf)))
+        termState.cwd = cwdbuf;
+    termState.setPrompt();
 
-    while (1)
+    while (termState.isRunning)
     {
         XEvent ev;
         XNextEvent(disp, &ev);
@@ -355,9 +414,7 @@ int main(void)
         }
     }
 
-    XFreeFont(disp, font);
-    XFreeGC(disp, gc);
-    XCloseDisplay(disp);
+    closeTerminal();
 
     return 0;
 }
