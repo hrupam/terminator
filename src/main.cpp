@@ -3,6 +3,8 @@
 #include <bits/stdc++.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <filesystem>
+
 #include "string_helper.h"
 
 using namespace std;
@@ -16,6 +18,8 @@ public:
     int cursor = 0;       /* length and cursor position in input */
     int scroll = 0;       /* how many lines scrolled back, 0 = bottom */
     string prompt;        /* "user@terminator> " or "> " */
+    string cwd;           /* shell's current directory */
+    int lastStatus = 0;   /* $? : exit status of the last command */
 
 public:
     void appendInput(const string &s)
@@ -97,6 +101,60 @@ void redraw(void)
     }
 }
 
+int builtinCd(vector<string> &words)
+{
+    if (words.size() > 2)
+    {
+        termState.appendOutput("terminator: cd: too many arguments\n");
+        return 1;
+    }
+    string home = getenv("HOME") ? getenv("HOME") : "/";
+    string arg = words.size() == 1 ? "~" : words[1];
+    string path;
+    if (arg == "~") // "cd" or "cd ~"
+    {
+        path = home;
+    }
+    else
+    {
+        if (startsWith(arg, "~/"))
+        {
+            path = home + arg.substr(1);
+        }
+        else if (startsWith(arg, "/"))
+        {
+            path = arg;
+        }
+        else
+            path = termState.cwd + "/" + arg;
+    }
+
+    // check if path is valid directory
+    error_code ec;
+    if (!filesystem::is_directory(path, ec))
+    {
+        string errMsg = ec ? ec.message() : "Not a directory";
+        termState.appendOutput("terminator: cd: " + arg + ": " + errMsg + "\n");
+        return 1;
+    }
+
+    if (access(path.c_str(), X_OK) != 0)
+    {
+        termState.appendOutput("terminator: cd: " + arg + ": Permission denied\n");
+        return 1;
+    }
+
+    string resolvedPath = filesystem::canonical(path, ec).string();
+    if (ec)
+    {
+        termState.appendOutput("terminator: cd: " + arg + ": " + ec.message() + "\n");
+        return 1;
+    }
+    termState.cwd = resolvedPath;
+
+    return 0;
+}
+
 void runCommand(const string &str)
 {
     string cmd = processCommand(str);
@@ -107,11 +165,18 @@ void runCommand(const string &str)
     for (string token; ss >> token;)
         words.push_back(token);
 
+    if (words[0] == "cd")
+    {
+        termState.lastStatus = builtinCd(words);
+        return;
+    }
+
     vector<char *> argv;
     for (string &w : words)
         argv.push_back(w.data());
     argv.push_back(nullptr);
-    string notFound = "terminator: " + words[0] + ": command not found\n";
+    string cmdNotFound = "terminator: " + words[0] + ": command not found\n";
+    string badDir = "terminator: cannot enter " + termState.cwd + "\n";
 
     int pipefd[2]; // pipefd[0] - read end, pipefd[1] - write end
     int pipeStatus = pipe(pipefd);
@@ -121,7 +186,7 @@ void runCommand(const string &str)
         return;
     }
 
-    pid_t pid = fork();
+    pid_t pid = fork(); // in parent - pid is child's pid, in child - pid is 0
     if (pid < 0)
     {
         perror("fork error");
@@ -137,9 +202,15 @@ void runCommand(const string &str)
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]); // close write end after dup2
+
+        if (chdir(termState.cwd.c_str()) < 0)
+        {
+            write(STDERR_FILENO, badDir.c_str(), badDir.size());
+            _exit(1);
+        }
         execvp(argv[0], argv.data());
 
-        write(STDERR_FILENO, notFound.c_str(), notFound.size());
+        write(STDERR_FILENO, cmdNotFound.c_str(), cmdNotFound.size());
         _exit(127);
     }
     else
@@ -194,6 +265,10 @@ int main(void)
     XMapWindow(disp, win);
 
     termState.prompt = "rupam@terminator> ";
+    char buf[PATH_MAX];
+    if (getcwd(buf, sizeof(buf)))
+        termState.cwd = buf;
+
     while (1)
     {
         XEvent ev;

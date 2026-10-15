@@ -24,3 +24,8 @@ string processCommand(const string &str)
     }
     return final;
 }
+
+bool startsWith(const string &str, const string &prefix)
+{
+    return str.rfind(prefix, 0) == 0;
+}
