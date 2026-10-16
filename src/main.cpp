@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <filesystem>
+#include <fcntl.h>
+#include <poll.h>
 
 #include "string_helper.h"
 
@@ -21,6 +23,9 @@ public:
     string cwd;            /* shell's current directory */
     int lastStatus = 0;    /* $? : exit status of the last command */
     bool isRunning = true; /* running state of the terminal */
+    int outFd = -1;        // read end of the running command's pipe, -1 if none
+    pid_t childPid = -1;   // the running command
+    bool busy = false;     // a command is running: don't draw the prompt
 
 public:
     void appendInput(const string &s)
@@ -67,6 +72,8 @@ GC gc;
 XFontStruct *font;
 unsigned int width = 1200, height = 800;
 
+Atom wmDeleteMessage;
+
 TerminalState termState;
 
 void redraw(void)
@@ -103,6 +110,11 @@ void redraw(void)
         {
             const string &line = termState.lines[v];
             XDrawString(disp, win, gc, 4, y, line.c_str(), line.length());
+        }
+        else if (termState.busy)
+        {
+            const string &p = termState.partial;
+            XDrawString(disp, win, gc, 4, y, p.c_str(), p.length());
         }
         else // the prompt line
         {
@@ -154,7 +166,7 @@ int builtinCd(vector<string> &words)
     error_code ec;
     if (!filesystem::is_directory(path, ec))
     {
-        string errMsg = ec ? ec.message() : "Not a directory";
+        string errMsg = ec ? ec.message() : "Not a directory"; // for - cd /etc/passwd
         termState.appendOutput("terminator: cd: " + arg + ": " + errMsg + "\n");
         return 1;
     }
@@ -179,7 +191,7 @@ int builtinCd(vector<string> &words)
 
 void runCommand(const string &str)
 {
-    string cmd = processCommand(str);
+    string cmd = processCommand(str); // removes whitespaces
 
     if (cmd.empty())
         return;
@@ -216,7 +228,7 @@ void runCommand(const string &str)
     string badDir = "terminator: cannot enter " + termState.cwd + "\n";
 
     int pipefd[2]; // pipefd[0] - read end, pipefd[1] - write end
-    int pipeStatus = pipe(pipefd);
+    int pipeStatus = pipe2(pipefd, O_CLOEXEC);
     if (pipeStatus < 0)
     {
         termState.lastStatus = 1;
@@ -237,6 +249,10 @@ void runCommand(const string &str)
     if (pid == 0)
     {
         // child
+        int devnullFd = open("/dev/null", O_RDONLY);
+        dup2(devnullFd, STDIN_FILENO);
+        close(devnullFd);
+
         close(pipefd[0]); // close read end
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
@@ -256,25 +272,116 @@ void runCommand(const string &str)
     {
         // parent
         close(pipefd[1]); // close write end
-        char buffer[4096];
-        ssize_t n;
-        while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0)
-            termState.appendOutput(string(buffer, n));
+        termState.childPid = pid;
+        termState.outFd = pipefd[0];
+        termState.busy = true;
+    }
+}
 
-        close(pipefd[0]);
-        int status;
-        waitpid(pid, &status, 0);
-        if (WIFEXITED(status))
+void finishCommand()
+{
+    close(termState.outFd); // close read end
+    int status;
+    waitpid(termState.childPid, &status, 0);
 
-            termState.lastStatus = WEXITSTATUS(status);
-        else if (WIFSIGNALED(status))
-            termState.lastStatus = 128 + WTERMSIG(status);
+    if (WIFEXITED(status))
+        termState.lastStatus = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        termState.lastStatus = 128 + WTERMSIG(status);
 
-        if (!termState.partial.empty()) // output without a final \n
+    if (!termState.partial.empty()) // output without a final \n
+    {
+        termState.lines.push_back(termState.partial);
+        termState.partial.clear();
+    }
+    termState.outFd = -1;
+    termState.childPid = -1;
+    termState.busy = false;
+}
+
+void handleEvent(XEvent &ev)
+{
+    if (ev.type == Expose && ev.xexpose.count == 0)
+    {
+        redraw();
+    }
+    else if (ev.type == KeyPress)
+    {
+        char buf[128] = {0};
+        KeySym keysym;
+        int len = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
+
+        switch (keysym)
         {
-            termState.lines.push_back(termState.partial);
-            termState.partial.clear();
+        case XK_Return:
+            if (termState.busy)
+                break;
+            termState.lines.push_back(termState.prompt + termState.input);
+            runCommand(termState.input);
+            termState.input.clear();
+            termState.cursor = 0;
+            termState.scroll = 0;
+            break;
+
+        case XK_BackSpace:
+            if (termState.input.length() > 0 && termState.cursor > 0)
+            {
+                termState.input.erase(termState.cursor - 1, 1);
+                termState.cursor--;
+            }
+            break;
+
+        case XK_Left:
+            if (termState.cursor > 0)
+            {
+                termState.cursor--;
+            }
+            break;
+
+        case XK_Right:
+            if (termState.cursor < (int)termState.input.length())
+            {
+                termState.cursor++;
+            }
+            break;
+
+        case XK_Prior: // Page Up
+            if (ev.xkey.state & ShiftMask)
+                termState.scroll += 10;
+            break;
+        case XK_Next: // Page Down
+            if (ev.xkey.state & ShiftMask)
+                termState.scroll -= 10;
+            break;
+
+        default:
+
+            if (len == 1 && (unsigned char)buf[0] >= 32 &&
+                !(ev.xkey.state & (ControlMask | Mod1Mask)))
+            {
+                termState.scroll = 0;
+                termState.appendInput(buf);
+            }
         }
+        redraw();
+    }
+    else if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == wmDeleteMessage)
+    {
+        termState.isRunning = false;
+    }
+    else if (ev.type == ConfigureNotify)
+    {
+        width = ev.xconfigure.width;
+        height = ev.xconfigure.height;
+        redraw();
+    }
+    else if (ev.type == ButtonPress)
+    {
+        if (ev.xbutton.button == 4)
+            termState.scroll += 3; // wheel up
+        if (ev.xbutton.button == 5)
+            termState.scroll -= 3; // wheel down
+        redraw();
     }
 }
 
@@ -299,7 +406,7 @@ int main(void)
 
     XSelectInput(disp, win, ExposureMask | KeyPressMask | StructureNotifyMask | ButtonPressMask);
 
-    Atom wmDeleteMessage = XInternAtom(disp, "WM_DELETE_WINDOW", False);
+    wmDeleteMessage = XInternAtom(disp, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(disp, win, &wmDeleteMessage, 1);
 
     const char *fontNames[] = {"12x24", "10x20", "9x15", "fixed"};
@@ -328,88 +435,36 @@ int main(void)
         termState.cwd = cwdbuf;
     termState.setPrompt();
 
+    int xfd = ConnectionNumber(disp);
+    fcntl(xfd, F_SETFD, FD_CLOEXEC);
+
     while (termState.isRunning)
     {
-        XEvent ev;
-        XNextEvent(disp, &ev);
-        if (ev.type == Expose && ev.xexpose.count == 0)
+        while (XPending(disp))
         {
-            redraw();
+            XEvent ev;
+            XNextEvent(disp, &ev);
+            handleEvent(ev);
         }
-        else if (ev.type == KeyPress)
-        {
-            char buf[128] = {0};
-            KeySym keysym;
-            int len = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
-
-            switch (keysym)
-            {
-            case XK_Return:
-                termState.lines.push_back(termState.prompt + termState.input);
-                runCommand(termState.input);
-                termState.input.clear();
-                termState.cursor = 0;
-                termState.scroll = 0;
-                break;
-
-            case XK_BackSpace:
-                if (termState.input.length() > 0 && termState.cursor > 0)
-                {
-                    termState.input.erase(termState.cursor - 1, 1);
-                    termState.cursor--;
-                }
-                break;
-
-            case XK_Left:
-                if (termState.cursor > 0)
-                {
-                    termState.cursor--;
-                }
-                break;
-
-            case XK_Right:
-                if (termState.cursor < (int)termState.input.length())
-                {
-                    termState.cursor++;
-                }
-                break;
-
-            case XK_Prior: // Page Up
-                if (ev.xkey.state & ShiftMask)
-                    termState.scroll += 10;
-                break;
-            case XK_Next: // Page Down
-                if (ev.xkey.state & ShiftMask)
-                    termState.scroll -= 10;
-                break;
-
-            default:
-
-                if (len == 1 && (unsigned char)buf[0] >= 32 &&
-                    !(ev.xkey.state & (ControlMask | Mod1Mask)))
-                {
-                    termState.scroll = 0;
-                    termState.appendInput(buf);
-                }
-            }
-            redraw();
-        }
-        else if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == wmDeleteMessage)
-        {
+        if (!termState.isRunning)
             break;
-        }
-        else if (ev.type == ConfigureNotify)
+        XFlush(disp);
+
+        vector<pollfd> fds;
+        fds.push_back({xfd, POLLIN, 0});
+        if (termState.outFd != -1)
+            fds.push_back({termState.outFd, POLLIN, 0});
+        poll(fds.data(), fds.size(), -1);
+
+        // to handle child's command execution
+        if (fds.size() > 1 && fds[1].revents & (POLLIN | POLLHUP))
         {
-            width = ev.xconfigure.width;
-            height = ev.xconfigure.height;
-            redraw();
-        }
-        else if (ev.type == ButtonPress)
-        {
-            if (ev.xbutton.button == 4)
-                termState.scroll += 3; // wheel up
-            if (ev.xbutton.button == 5)
-                termState.scroll -= 3; // wheel down
+            char buffer[4096];
+            ssize_t n = read(termState.outFd, buffer, sizeof(buffer));
+            if (n > 0)
+                termState.appendOutput(string(buffer, n));
+            else if (n == 0 || errno != EINTR)
+                finishCommand();
             redraw();
         }
     }
