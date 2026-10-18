@@ -74,10 +74,19 @@ unsigned int width = 1200, height = 800;
 
 Atom wmDeleteMessage;
 
-TerminalState termState;
+vector<TerminalState> tabs;
+int currentTab = 0;
+
+bool appRunning = true;
+
+TerminalState &getCurrTab()
+{
+    return tabs[currentTab];
+}
 
 void redraw(void)
 {
+    TerminalState &termState = getCurrTab();
     XClearWindow(disp, win);
     int lineHeight = font->ascent + font->descent;
     int charw = font->max_bounds.width;
@@ -127,6 +136,31 @@ void redraw(void)
     }
 }
 
+void closeTab(int tabIndex)
+{
+    TerminalState &tab = tabs[tabIndex];
+    if (tab.busy)
+    {
+        kill(tab.childPid, SIGHUP);
+        close(tab.outFd);
+        waitpid(tab.childPid, nullptr, 0);
+    }
+
+    int n = tabs.size();
+    if (n == 1)
+    {
+        appRunning = false;
+        return;
+    }
+
+    tabs.erase(tabs.begin() + tabIndex);
+
+    if (currentTab > tabIndex)
+        currentTab--;
+    else if (currentTab == tabIndex && tabIndex == n - 1)
+        currentTab--;
+}
+
 void closeTerminal()
 {
     XFreeFont(disp, font);
@@ -134,7 +168,7 @@ void closeTerminal()
     XCloseDisplay(disp);
 }
 
-int builtinCd(vector<string> &words)
+int builtinCd(vector<string> &words, TerminalState &termState)
 {
     if (words.size() > 2)
     {
@@ -189,7 +223,7 @@ int builtinCd(vector<string> &words)
     return 0;
 }
 
-void runCommand(const string &str)
+void runCommand(const string &str, TerminalState &termState)
 {
     string cmd = processCommand(str); // removes whitespaces
 
@@ -215,7 +249,7 @@ void runCommand(const string &str)
 
     if (words[0] == "cd")
     {
-        termState.lastStatus = builtinCd(words);
+        termState.lastStatus = builtinCd(words, termState);
         return;
     }
 
@@ -278,7 +312,7 @@ void runCommand(const string &str)
     }
 }
 
-void finishCommand()
+void finishCommand(TerminalState &termState)
 {
     close(termState.outFd); // close read end
     int status;
@@ -299,25 +333,88 @@ void finishCommand()
     termState.busy = false;
 }
 
+void newTab()
+{
+    TerminalState newTermState;
+    newTermState.cwd = getCurrTab().cwd;
+    newTermState.setPrompt();
+    tabs.push_back(newTermState);
+    currentTab = tabs.size() - 1;
+}
+
+bool closeTabsBasedOnRunning()
+{
+    bool isClosed = false;
+    for (int i = (int)tabs.size() - 1; i >= 0; i--)
+    {
+        if (!tabs[i].isRunning)
+        {
+            closeTab(i);
+            isClosed = true;
+        }
+    }
+    return isClosed;
+}
+
 void handleEvent(XEvent &ev)
 {
+
     if (ev.type == Expose && ev.xexpose.count == 0)
     {
         redraw();
+        return;
     }
-    else if (ev.type == KeyPress)
+
+    if (ev.type == KeyPress)
     {
         char buf[128] = {0};
         KeySym keysym;
         int len = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
 
+        unsigned mods = ev.xkey.state & (ControlMask | ShiftMask);
+        bool ctrl = mods & ControlMask;
+        bool ctrlShift = mods == (ControlMask | ShiftMask);
+
+        // Ctrl+Shift+T: create tab
+        if (ctrlShift && (keysym == XK_T || keysym == XK_t))
+        {
+            newTab();
+            redraw();
+            return;
+        }
+        // Ctrl+Right: next tab
+        if (ctrl && keysym == XK_Right)
+        {
+            currentTab = (currentTab + 1) % tabs.size();
+            redraw();
+            return;
+        }
+        // Ctrl+Left: previous tab
+        if (ctrl && keysym == XK_Left)
+        {
+            if (currentTab == 0)
+                currentTab = tabs.size() - 1;
+            else
+                currentTab--;
+            redraw();
+            return;
+        }
+        if (ctrl && (keysym == XK_D || keysym == XK_d))
+        {
+            closeTab(currentTab);
+            if (appRunning)
+                redraw();
+            return;
+        }
+
+        TerminalState &termState = getCurrTab();
         switch (keysym)
         {
         case XK_Return:
             if (termState.busy)
                 break;
             termState.lines.push_back(termState.prompt + termState.input);
-            runCommand(termState.input);
+            runCommand(termState.input, termState);
             termState.input.clear();
             termState.cursor = 0;
             termState.scroll = 0;
@@ -364,24 +461,29 @@ void handleEvent(XEvent &ev)
             }
         }
         redraw();
+        return;
     }
-    else if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == wmDeleteMessage)
+    TerminalState &termState = getCurrTab();
+    if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == wmDeleteMessage)
     {
-        termState.isRunning = false;
+        appRunning = false;
+        return;
     }
-    else if (ev.type == ConfigureNotify)
+    if (ev.type == ConfigureNotify)
     {
         width = ev.xconfigure.width;
         height = ev.xconfigure.height;
         redraw();
+        return;
     }
-    else if (ev.type == ButtonPress)
+    if (ev.type == ButtonPress)
     {
         if (ev.xbutton.button == 4)
             termState.scroll += 3; // wheel up
         if (ev.xbutton.button == 5)
             termState.scroll -= 3; // wheel down
         redraw();
+        return;
     }
 }
 
@@ -429,16 +531,18 @@ int main(void)
 
     XMapWindow(disp, win);
 
+    tabs.emplace_back();
+
     // getting initial working directory
     char cwdbuf[PATH_MAX];
     if (getcwd(cwdbuf, sizeof(cwdbuf)))
-        termState.cwd = cwdbuf;
-    termState.setPrompt();
+        getCurrTab().cwd = cwdbuf;
+    getCurrTab().setPrompt();
 
     int xfd = ConnectionNumber(disp);
     fcntl(xfd, F_SETFD, FD_CLOEXEC);
 
-    while (termState.isRunning)
+    while (appRunning)
     {
         while (XPending(disp))
         {
@@ -446,27 +550,45 @@ int main(void)
             XNextEvent(disp, &ev);
             handleEvent(ev);
         }
-        if (!termState.isRunning)
+        bool isTabClosed = closeTabsBasedOnRunning();
+        if (!appRunning)
             break;
+        else if (isTabClosed)
+            redraw();
         XFlush(disp);
 
         vector<pollfd> fds;
         fds.push_back({xfd, POLLIN, 0});
-        if (termState.outFd != -1)
-            fds.push_back({termState.outFd, POLLIN, 0});
+        vector<int> fdTab;
+        for (size_t i = 0; i < tabs.size(); i++)
+        {
+            if (tabs[i].outFd != -1)
+            {
+                fds.push_back({tabs[i].outFd, POLLIN, 0});
+                fdTab.push_back(i);
+            }
+        }
+
         poll(fds.data(), fds.size(), -1);
 
-        // to handle child's command execution
-        if (fds.size() > 1 && fds[1].revents & (POLLIN | POLLHUP))
+        // to handle child's command execution in Tabs
+        bool changed = false;
+        for (size_t k = 1; k < fds.size(); k++)
         {
-            char buffer[4096];
-            ssize_t n = read(termState.outFd, buffer, sizeof(buffer));
-            if (n > 0)
-                termState.appendOutput(string(buffer, n));
-            else if (n == 0 || errno != EINTR)
-                finishCommand();
-            redraw();
+            if (fds[k].revents & (POLLIN | POLLHUP))
+            {
+                char buffer[4096];
+                TerminalState &tab = tabs[fdTab[k - 1]];
+                ssize_t n = read(tab.outFd, buffer, sizeof(buffer));
+                if (n > 0)
+                    tab.appendOutput(string(buffer, n));
+                else if (n == 0 || errno != EINTR)
+                    finishCommand(tab);
+                changed = true;
+            }
         }
+        if (changed)
+            redraw();
     }
 
     closeTerminal();
