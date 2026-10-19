@@ -9,7 +9,27 @@
 
 #include "string_helper.h"
 
+#define TABHEIGHT 2
+
 using namespace std;
+
+Display *disp;
+Window win;
+GC gc;
+XFontStruct *font;
+unsigned int width = 1200, height = 800;
+unsigned long bgColor, fgColor, accentColor, dimColor; // pixel values from namedColor()
+
+Atom wmDeleteMessage;
+
+unsigned long namedColor(const char *name, unsigned long fallback)
+{
+    XColor screenColor, exactColor;
+    Colormap cmap = DefaultColormap(disp, DefaultScreen(disp));
+    if (XAllocNamedColor(disp, cmap, name, &screenColor, &exactColor))
+        return screenColor.pixel;
+    return fallback;
+}
 
 class TerminalState
 {
@@ -52,36 +72,85 @@ public:
         }
     }
 
-    void setPrompt()
+    string getShortCwdPath()
     {
         string cwdPath = this->cwd;
         string homePath = getenv("HOME");
         string pathText = cwdPath;
         if (startsWith(cwdPath, homePath))
-        {
             pathText = "~" + cwdPath.substr(homePath.length());
-        }
+        return pathText;
+    }
+    void setPrompt()
+    {
+        string pathText = this->getShortCwdPath();
         string promptText = "rupam@terminator: " + pathText + "> ";
         this->prompt = promptText;
     }
 };
 
-Display *disp;
-Window win;
-GC gc;
-XFontStruct *font;
-unsigned int width = 1200, height = 800;
-
-Atom wmDeleteMessage;
-
 vector<TerminalState> tabs;
 int currentTab = 0;
+
+vector<pair<int, int>> tabBounds; // x start / x end of each tab label, filled in redraw
+pair<int, int> plusBounds;        // the [ + ] button
 
 bool appRunning = true;
 
 TerminalState &getCurrTab()
 {
     return tabs[currentTab];
+}
+
+void drawTabBar(int lineHeight, int charw)
+{
+    int top = 2;                        // small gap from the window edge
+    int boxH = lineHeight + 4;          // label box height
+    int textY = top + 2 + font->ascent; // baseline of the label text
+    int x = 4;
+
+    tabBounds.clear();
+    for (int i = 0; i < (int)tabs.size(); i++)
+    {
+        string path = tabs[i].getShortCwdPath();
+        if (path.size() > 15) // keep labels short
+            path = "..." + path.substr(path.size() - 12);
+        string label = " " + to_string(i + 1) + ": " + path + (tabs[i].busy ? " *" : "") + " ";
+        int w = label.size() * charw;
+
+        if (i == currentTab) // highlighted: accent-filled box, text on top
+        {
+            XSetForeground(disp, gc, accentColor);
+            XFillRectangle(disp, win, gc, x, top, w, boxH);
+            XSetForeground(disp, gc, fgColor);
+            XDrawString(disp, win, gc, x, textY, label.c_str(), label.size());
+        }
+        else // others: dim outline, normal text
+        {
+            XSetForeground(disp, gc, dimColor);
+            XDrawRectangle(disp, win, gc, x, top, w, boxH);
+            XSetForeground(disp, gc, fgColor);
+            XDrawString(disp, win, gc, x, textY, label.c_str(), label.size());
+        }
+        tabBounds.push_back({x, x + w});
+        x += w + charw; // gap between labels
+    }
+
+    // [ + ] button for a new tab
+    string plus = " + ";
+    int pw = plus.size() * charw;
+    XSetForeground(disp, gc, dimColor);
+    XDrawRectangle(disp, win, gc, x, top, pw, boxH);
+    XSetForeground(disp, gc, fgColor);
+    XDrawString(disp, win, gc, x, textY, plus.c_str(), plus.size());
+    plusBounds = {x, x + pw};
+
+    // separator line between the bar and the text area
+    int sepY = TABHEIGHT * lineHeight - lineHeight / 2;
+    XSetForeground(disp, gc, dimColor);
+    XDrawLine(disp, win, gc, 0, sepY, width, sepY);
+
+    XSetForeground(disp, gc, fgColor); // back to text colour for the rest of redraw
 }
 
 void redraw(void)
@@ -91,7 +160,9 @@ void redraw(void)
     int lineHeight = font->ascent + font->descent;
     int charw = font->max_bounds.width;
 
-    int rows = height / lineHeight; // how many lines fit
+    drawTabBar(lineHeight, charw);
+
+    int rows = height / lineHeight - TABHEIGHT; // how many lines fit
     if (rows < 1)
         rows = 1;
     int total = termState.lines.size() + 1;      // +1 for the prompt line
@@ -113,7 +184,7 @@ void redraw(void)
 
     for (int v = first; v < last; v++)
     {
-        int y = (v - first) * lineHeight + font->ascent;
+        int y = (v - first + TABHEIGHT) * lineHeight + font->ascent;
 
         if (v < (int)termState.lines.size()) // an output line
         {
@@ -131,7 +202,9 @@ void redraw(void)
             XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
 
             int col = termState.prompt.size() + termState.cursor;
+            XSetForeground(disp, gc, accentColor); // cursor in accent colour
             XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
+            XSetForeground(disp, gc, fgColor);
         }
     }
 }
@@ -163,8 +236,11 @@ void closeTab(int tabIndex)
 
 void closeTerminal()
 {
+    unsigned long colors[] = {bgColor, fgColor, accentColor, dimColor};
+    XFreeColors(disp, DefaultColormap(disp, DefaultScreen(disp)), colors, 4, 0);
     XFreeFont(disp, font);
     XFreeGC(disp, gc);
+    XDestroyWindow(disp, win);
     XCloseDisplay(disp);
 }
 
@@ -452,7 +528,6 @@ void handleEvent(XEvent &ev)
             break;
 
         default:
-
             if (len == 1 && (unsigned char)buf[0] >= 32 &&
                 !(ev.xkey.state & (ControlMask | Mod1Mask)))
             {
@@ -461,6 +536,36 @@ void handleEvent(XEvent &ev)
             }
         }
         redraw();
+        return;
+    }
+    if (ev.type == ButtonPress && ev.xbutton.button == 1) // left click
+    {
+        int lineHeight = font->ascent + font->descent;
+        if (ev.xbutton.y < TABHEIGHT * lineHeight) // inside the tab bar
+        {
+            int cx = ev.xbutton.x;
+            int tabi = -1;
+            for (int i = 0; i < (int)tabBounds.size(); i++)
+            {
+                if (cx >= tabBounds[i].first && cx <= tabBounds[i].second)
+                {
+                    tabi = i;
+                    break;
+                }
+            }
+            if (tabi != -1 && currentTab != tabi)
+            {
+                currentTab = tabi;
+                redraw();
+                return;
+            }
+
+            if (cx >= plusBounds.first && cx <= plusBounds.second)
+            {
+                newTab();
+                redraw();
+            }
+        }
         return;
     }
     TerminalState &termState = getCurrTab();
@@ -498,12 +603,17 @@ int main(void)
 
     int scr = DefaultScreen(disp);
     Window rootWin = RootWindow(disp, scr);
+
+    bgColor = namedColor("gray12", BlackPixel(disp, scr));
+    fgColor = namedColor("gray85", WhitePixel(disp, scr));
+    accentColor = namedColor("SteelBlue", WhitePixel(disp, scr));
+    dimColor = namedColor("gray40", WhitePixel(disp, scr));
+
     int x = 0, y = 0;
     unsigned int border_width = 1;
-    unsigned long border = WhitePixel(disp, scr);
-    unsigned long background = BlackPixel(disp, scr);
+    unsigned long border = dimColor;
 
-    win = XCreateSimpleWindow(disp, rootWin, x, y, width, height, border_width, border, background);
+    win = XCreateSimpleWindow(disp, rootWin, x, y, width, height, border_width, border, bgColor);
     XStoreName(disp, win, "Terminator");
 
     XSelectInput(disp, win, ExposureMask | KeyPressMask | StructureNotifyMask | ButtonPressMask);
@@ -526,7 +636,7 @@ int main(void)
     }
 
     gc = XCreateGC(disp, win, 0, NULL);
-    XSetForeground(disp, gc, WhitePixel(disp, scr));
+    XSetForeground(disp, gc, fgColor);
     XSetFont(disp, gc, font->fid);
 
     XMapWindow(disp, win);
@@ -553,7 +663,7 @@ int main(void)
         bool isTabClosed = closeTabsBasedOnRunning();
         if (!appRunning)
             break;
-        else if (isTabClosed)
+        if (isTabClosed)
             redraw();
         XFlush(disp);
 
