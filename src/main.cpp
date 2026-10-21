@@ -317,25 +317,72 @@ void runCommand(const string &str, TerminalState &termState)
             w = to_string(termState.lastStatus);
     }
 
-    if (words[0] == "exit")
+    vector<string> cmdWords;
+    string inFile, outFile;
+    bool isAppendMode = false;
+    for (size_t i = 0; i < words.size(); i++)
+    {
+        string w = words[i];
+        if (w == ">" || w == ">>" || w == "<")
+        {
+            if (i + 1 >= words.size())
+            {
+                termState.appendOutput("terminator: syntax error: missing file after " + w + "\n");
+                termState.lastStatus = 2;
+                return;
+            }
+            if (w == "<")
+                inFile = words[i + 1];
+            else
+            {
+                outFile = words[i + 1];
+                if (w == ">>")
+                    isAppendMode = true;
+            }
+            i++;
+        }
+        else
+        {
+            cmdWords.push_back(w);
+        }
+    }
+
+    if (cmdWords.empty())
+        return;
+
+    if (cmdWords[0] == "exit")
     {
         termState.isRunning = false;
         return;
     }
 
-    if (words[0] == "cd")
+    if (cmdWords[0] == "cd")
     {
-        termState.lastStatus = builtinCd(words, termState);
+        termState.lastStatus = builtinCd(cmdWords, termState);
         return;
     }
 
     vector<char *> argv;
-    for (string &w : words)
+    for (string &w : cmdWords)
         argv.push_back(w.data());
     argv.push_back(nullptr);
 
-    string cmdNotFound = "terminator: " + words[0] + ": command not found\n";
+    string cmdNotFound = "terminator: " + cmdWords[0] + ": command not found\n";
     string badDir = "terminator: cannot enter " + termState.cwd + "\n";
+
+    // Redirection
+    auto resolve = [&](const string &f)
+    { return f[0] == '/' ? f : termState.cwd + "/" + f; };
+    string inPath = inFile.empty() ? "" : resolve(inFile);
+    string outPath = outFile.empty() ? "" : resolve(outFile);
+
+    if (!inPath.empty() && access(inPath.c_str(), R_OK) != 0)
+    {
+        termState.appendOutput("terminator: " + inFile + ": " + strerror(errno) + "\n");
+        termState.lastStatus = 1;
+        return;
+    }
+    string openFailMsg = "terminator: cannot open " + (outFile.empty() ? inFile : outFile) + "\n";
 
     int pipefd[2]; // pipefd[0] - read end, pipefd[1] - write end
     int pipeStatus = pipe2(pipefd, O_CLOEXEC);
@@ -367,6 +414,33 @@ void runCommand(const string &str, TerminalState &termState)
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]); // close write end after dup2
+
+        // Redirection
+        if (!inPath.empty())
+        {
+            int inFileFd = open(inPath.c_str(), O_RDONLY);
+            if (inFileFd < 0)
+            {
+                write(STDERR_FILENO, openFailMsg.c_str(), openFailMsg.size());
+                _exit(1);
+            }
+            dup2(inFileFd, STDIN_FILENO);
+            close(inFileFd);
+        }
+
+        if (!outPath.empty())
+        {
+            auto flags = O_WRONLY | O_CREAT | (isAppendMode ? O_APPEND : O_TRUNC);
+            int outFileFd = open(outPath.c_str(), flags, 0644);
+
+            if (outFileFd < 0)
+            {
+                write(STDERR_FILENO, openFailMsg.c_str(), openFailMsg.size());
+                _exit(1);
+            }
+            dup2(outFileFd, STDOUT_FILENO);
+            close(outFileFd);
+        }
 
         if (chdir(termState.cwd.c_str()) < 0)
         {
