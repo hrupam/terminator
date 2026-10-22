@@ -34,18 +34,19 @@ unsigned long namedColor(const char *name, unsigned long fallback)
 class TerminalState
 {
 public:
-    vector<string> lines;  /* finished output lines */
-    string partial;        /* output line still being written (no \n yet) */
-    string input;          /* the line being typed */
-    int cursor = 0;        /* length and cursor position in input */
-    int scroll = 0;        /* how many lines scrolled back, 0 = bottom */
-    string prompt;         /* "user@terminator> " or "> " */
-    string cwd;            /* shell's current directory */
-    int lastStatus = 0;    /* $? : exit status of the last command */
-    bool isRunning = true; /* running state of the terminal */
-    int outFd = -1;        // read end of the running command's pipe, -1 if none
-    pid_t childPid = -1;   // the running command
-    bool busy = false;     // a command is running: don't draw the prompt
+    vector<string> lines;    /* finished output lines */
+    string partial;          /* output line still being written (no \n yet) */
+    string input;            /* the line being typed */
+    int cursor = 0;          /* length and cursor position in input */
+    int scroll = 0;          /* how many lines scrolled back, 0 = bottom */
+    string prompt;           /* "user@terminator> " or "> " */
+    string cwd;              /* shell's current directory */
+    int lastStatus = 0;      /* $? : exit status of the last command */
+    bool isRunning = true;   /* running state of the terminal */
+    int outFd = -1;          // read end of the running command's pipe, -1 if none
+    vector<pid_t> childPids; // every process in the running pipeline
+    pid_t pgid = -1;         // their process group (= first child's pid)
+    bool busy = false;       // a command is running: don't draw the prompt
 
 public:
     void appendInput(const string &s)
@@ -91,6 +92,15 @@ public:
 
 vector<TerminalState> tabs;
 int currentTab = 0;
+
+class CommandStage
+{
+public:
+    vector<string> words;
+    string inFile;
+    string outFile;
+    bool isAppendMode = false;
+};
 
 vector<pair<int, int>> tabBounds; // x start / x end of each tab label, filled in redraw
 pair<int, int> plusBounds;        // the [ + ] button
@@ -214,9 +224,11 @@ void closeTab(int tabIndex)
     TerminalState &tab = tabs[tabIndex];
     if (tab.busy)
     {
-        kill(tab.childPid, SIGHUP);
+        if (tab.pgid > 0)
+            kill(-tab.pgid, SIGHUP);
         close(tab.outFd);
-        waitpid(tab.childPid, nullptr, 0);
+        for (pid_t chpid : tab.childPids)
+            waitpid(chpid, nullptr, 0);
     }
 
     int n = tabs.size();
@@ -317,161 +329,242 @@ void runCommand(const string &str, TerminalState &termState)
             w = to_string(termState.lastStatus);
     }
 
-    vector<string> cmdWords;
-    string inFile, outFile;
-    bool isAppendMode = false;
+    vector<CommandStage> stages;
+    CommandStage currStage;
     for (size_t i = 0; i < words.size(); i++)
     {
         string w = words[i];
-        if (w == ">" || w == ">>" || w == "<")
+        if (w != "|")
         {
-            if (i + 1 >= words.size())
+            if (w == ">" || w == ">>" || w == "<")
             {
-                termState.appendOutput("terminator: syntax error: missing file after " + w + "\n");
-                termState.lastStatus = 2;
-                return;
+                if (i + 1 >= words.size())
+                {
+                    termState.appendOutput("terminator: syntax error: missing file after " + w + "\n");
+                    termState.lastStatus = 2;
+                    return;
+                }
+                if (w == "<")
+                    currStage.inFile = words[i + 1];
+                else
+                {
+                    currStage.outFile = words[i + 1];
+                    if (w == ">>")
+                        currStage.isAppendMode = true;
+                }
+                i++;
             }
-            if (w == "<")
-                inFile = words[i + 1];
             else
-            {
-                outFile = words[i + 1];
-                if (w == ">>")
-                    isAppendMode = true;
-            }
-            i++;
+                currStage.words.push_back(w);
         }
         else
         {
-            cmdWords.push_back(w);
+            if (currStage.words.empty())
+            {
+                termState.appendOutput("terminator: syntax error near '|'\n");
+                termState.lastStatus = 2;
+                return;
+            }
+            stages.push_back(currStage);
+            currStage = CommandStage();
         }
     }
+    if (currStage.words.empty() && !stages.empty())
+    {
+        termState.appendOutput("terminator: syntax error near '|'\n");
+        termState.lastStatus = 2;
+        return;
+    }
+    stages.push_back(currStage);
 
-    if (cmdWords.empty())
+    if (stages.empty() || stages[0].words.empty())
         return;
 
-    if (cmdWords[0] == "exit")
+    int n = stages.size();
+
+    if (n == 1 && stages[0].words[0] == "exit")
     {
         termState.isRunning = false;
         return;
     }
 
-    if (cmdWords[0] == "cd")
+    if (n == 1 && stages[0].words[0] == "cd")
     {
-        termState.lastStatus = builtinCd(cmdWords, termState);
+        termState.lastStatus = builtinCd(stages[0].words, termState);
         return;
     }
 
-    vector<char *> argv;
-    for (string &w : cmdWords)
-        argv.push_back(w.data());
-    argv.push_back(nullptr);
+    if (n == 1 && stages[0].words[0] == "clear")
+    {
+        termState.lines.clear();
+        termState.partial.clear();
+        termState.lastStatus = 0;
+        return;
+    }
 
-    string cmdNotFound = "terminator: " + cmdWords[0] + ": command not found\n";
-    string badDir = "terminator: cannot enter " + termState.cwd + "\n";
-
-    // Redirection
     auto resolve = [&](const string &f)
     { return f[0] == '/' ? f : termState.cwd + "/" + f; };
-    string inPath = inFile.empty() ? "" : resolve(inFile);
-    string outPath = outFile.empty() ? "" : resolve(outFile);
+    vector<vector<char *>> argvs(n);
+    vector<string> notFound(n), inPaths(n), outPaths(n), openFail(n);
 
-    if (!inPath.empty() && access(inPath.c_str(), R_OK) != 0)
+    for (int i = 0; i < n; i++)
     {
-        termState.appendOutput("terminator: " + inFile + ": " + strerror(errno) + "\n");
-        termState.lastStatus = 1;
-        return;
-    }
-    string openFailMsg = "terminator: cannot open " + (outFile.empty() ? inFile : outFile) + "\n";
+        CommandStage &stage = stages[i];
+        for (string &w : stage.words)
+            argvs[i].push_back(w.data());
+        argvs[i].push_back(nullptr);
 
-    int pipefd[2]; // pipefd[0] - read end, pipefd[1] - write end
-    int pipeStatus = pipe2(pipefd, O_CLOEXEC);
-    if (pipeStatus < 0)
-    {
-        termState.lastStatus = 1;
-        perror("pipe error");
-        return;
-    }
+        notFound[i] = "terminator: " + stage.words[0] + ": command not found\n";
+        if (!stage.inFile.empty())
+            inPaths[i] = resolve(stage.inFile);
+        if (!stage.outFile.empty())
+            outPaths[i] = resolve(stage.outFile);
+        openFail[i] = "terminator: cannot open file\n";
 
-    pid_t pid = fork(); // in parent - pid is child's pid, in child - pid is 0
-    if (pid < 0)
-    {
-        termState.lastStatus = 1;
-        perror("fork error");
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return;
-    }
-
-    if (pid == 0)
-    {
-        // child
-        int devnullFd = open("/dev/null", O_RDONLY);
-        dup2(devnullFd, STDIN_FILENO);
-        close(devnullFd);
-
-        close(pipefd[0]); // close read end
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]); // close write end after dup2
-
-        // Redirection
-        if (!inPath.empty())
+        if (!inPaths[i].empty() && access(inPaths[i].c_str(), R_OK) != 0)
         {
-            int inFileFd = open(inPath.c_str(), O_RDONLY);
-            if (inFileFd < 0)
+            termState.appendOutput("terminator: " + stage.inFile + ": " + strerror(errno) + "\n");
+            termState.lastStatus = 1;
+            return;
+        }
+    }
+
+    string badDir = "terminator: cannot enter " + termState.cwd + "\n";
+
+    // Pipes
+    int outPipe[2]; // final pipe
+    if (pipe2(outPipe, O_CLOEXEC) < 0)
+    {
+        termState.lastStatus = 1;
+        return;
+    }
+    vector<vector<int>> pipes(n - 1, vector<int>(2));
+    for (int i = 0; i < n - 1; i++)
+    {
+        int *fd = pipes[i].data();
+
+        if (pipe2(fd, O_CLOEXEC) < 0)
+        {
+
+            for (int j = 0; j < i; j++)
             {
-                write(STDERR_FILENO, openFailMsg.c_str(), openFailMsg.size());
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            close(outPipe[0]);
+            close(outPipe[1]);
+            termState.lastStatus = 1;
+            return;
+        }
+    }
+
+    // Fork
+    vector<pid_t> pids;
+    pid_t pgid = 0;
+    for (int i = 0; i < n; i++)
+    {
+        pid_t pid = fork();
+        if (pid < 0)
+            break;
+        if (pid == 0)
+        {
+            setpgid(0, pgid);
+
+            if (i == 0)
+            {
+                int devNullFd = open("/dev/null", O_RDONLY);
+                dup2(devNullFd, STDIN_FILENO);
+                close(devNullFd);
+            }
+            else
+                dup2(pipes[i - 1][0], STDIN_FILENO);
+
+            if (i == n - 1)
+                dup2(outPipe[1], STDOUT_FILENO);
+            else
+                dup2(pipes[i][1], STDOUT_FILENO);
+            dup2(outPipe[1], STDERR_FILENO);
+
+            // redirection
+            if (!inPaths[i].empty())
+            {
+                int inFileFd = open(inPaths[i].c_str(), O_RDONLY);
+                if (inFileFd < 0)
+                {
+                    write(STDERR_FILENO, openFail[i].c_str(), openFail[i].size());
+                    _exit(1);
+                }
+                dup2(inFileFd, STDIN_FILENO);
+                close(inFileFd);
+            }
+
+            if (!outPaths[i].empty())
+            {
+                auto flags = O_WRONLY | O_CREAT | (stages[i].isAppendMode ? O_APPEND : O_TRUNC);
+                int outFileFd = open(outPaths[i].c_str(), flags, 0644);
+
+                if (outFileFd < 0)
+                {
+                    write(STDERR_FILENO, openFail[i].c_str(), openFail[i].size());
+                    _exit(1);
+                }
+                dup2(outFileFd, STDOUT_FILENO);
+                close(outFileFd);
+            }
+
+            if (chdir(termState.cwd.c_str()) < 0)
+            {
+                write(STDERR_FILENO, badDir.c_str(), badDir.size());
                 _exit(1);
             }
-            dup2(inFileFd, STDIN_FILENO);
-            close(inFileFd);
+            execvp(argvs[i][0], argvs[i].data());
+            write(STDERR_FILENO, notFound[i].c_str(), notFound[i].size());
+            _exit(127);
         }
-
-        if (!outPath.empty())
+        else
         {
-            auto flags = O_WRONLY | O_CREAT | (isAppendMode ? O_APPEND : O_TRUNC);
-            int outFileFd = open(outPath.c_str(), flags, 0644);
-
-            if (outFileFd < 0)
-            {
-                write(STDERR_FILENO, openFailMsg.c_str(), openFailMsg.size());
-                _exit(1);
-            }
-            dup2(outFileFd, STDOUT_FILENO);
-            close(outFileFd);
+            if (pgid == 0)
+                pgid = pid;
+            setpgid(pid, pgid);
+            pids.push_back(pid);
         }
-
-        if (chdir(termState.cwd.c_str()) < 0)
-        {
-            write(STDERR_FILENO, badDir.c_str(), badDir.size());
-            _exit(1);
-        }
-        execvp(argv[0], argv.data());
-
-        write(STDERR_FILENO, cmdNotFound.c_str(), cmdNotFound.size());
-        _exit(127);
     }
-    else
+
+    // parent cleanup
+    close(outPipe[1]);
+    for (auto &p : pipes)
     {
-        // parent
-        close(pipefd[1]); // close write end
-        termState.childPid = pid;
-        termState.outFd = pipefd[0];
-        termState.busy = true;
+        close(p[0]);
+        close(p[1]);
     }
+    if (pids.empty()) // the very first fork failed
+    {
+        close(outPipe[0]);
+        termState.appendOutput("terminator: fork failed\n");
+        termState.lastStatus = 1;
+        return;
+    }
+    termState.outFd = outPipe[0];
+    termState.pgid = pgid;
+    termState.childPids = pids;
+    termState.busy = true;
 }
 
 void finishCommand(TerminalState &termState)
 {
     close(termState.outFd); // close read end
-    int status;
-    waitpid(termState.childPid, &status, 0);
-
-    if (WIFEXITED(status))
-        termState.lastStatus = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status))
-        termState.lastStatus = 128 + WTERMSIG(status);
+    for (size_t i = 0; i < termState.childPids.size(); i++)
+    {
+        int status;
+        waitpid(termState.childPids[i], &status, 0);
+        if (i == termState.childPids.size() - 1)
+        {
+            if (WIFEXITED(status))
+                termState.lastStatus = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status))
+                termState.lastStatus = 128 + WTERMSIG(status);
+        }
+    }
 
     if (!termState.partial.empty()) // output without a final \n
     {
@@ -479,7 +572,8 @@ void finishCommand(TerminalState &termState)
         termState.partial.clear();
     }
     termState.outFd = -1;
-    termState.childPid = -1;
+    termState.childPids.clear();
+    termState.pgid = -1;
     termState.busy = false;
 }
 
