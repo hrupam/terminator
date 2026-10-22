@@ -394,6 +394,14 @@ void runCommand(const string &str, TerminalState &termState)
         return;
     }
 
+    if (n == 1 && stages[0].words[0] == "clear")
+    {
+        termState.lines.clear();
+        termState.partial.clear();
+        termState.lastStatus = 0;
+        return;
+    }
+
     auto resolve = [&](const string &f)
     { return f[0] == '/' ? f : termState.cwd + "/" + f; };
     vector<vector<char *>> argvs(n);
