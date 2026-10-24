@@ -43,6 +43,7 @@ public:
     vector<string> lines;    /* finished output lines */
     string partial;          /* output line still being written (no \n yet) */
     string input;            /* the line being typed */
+    string pending;          // unfinished input waiting for more lines, "" if none
     int cursor = 0;          /* length and cursor position in input */
     int scroll = 0;          /* how many lines scrolled back, 0 = bottom */
     string prompt;           /* "user@terminator> " or "> " */
@@ -370,10 +371,11 @@ void redraw(void)
         }
         else // the prompt line
         {
-            string displayText = termState.prompt + termState.input;
+            string p = termState.pending.empty() ? termState.prompt : "> ";
+            string displayText = p + termState.input;
             XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
 
-            int col = termState.prompt.size() + termState.cursor;
+            int col = p.size() + termState.cursor;
             XSetForeground(disp, gc, accentColor); // cursor in accent colour
             XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
             XSetForeground(disp, gc, fgColor);
@@ -478,8 +480,7 @@ void runCommand(const string &str, TerminalState &termState)
     vector<Token> toks;
     if (!tokenize(str, termState, toks))
     {
-        termState.appendOutput("terminator: incomplete input\n"); // TEMP: step 2 replaces this
-        termState.lastStatus = 2;
+        termState.pending = str;
         return;
     }
     if (toks.empty())
@@ -808,14 +809,19 @@ void handleEvent(XEvent &ev)
         switch (keysym)
         {
         case XK_Return:
+        {
             if (termState.busy)
                 break;
-            termState.lines.push_back(termState.prompt + termState.input);
-            runCommand(termState.input, termState);
+            bool cont = !termState.pending.empty();
+            termState.lines.push_back((cont ? "> " : termState.prompt) + termState.input);
+            string full = cont ? termState.pending + "\n" + termState.input : termState.input;
+            termState.pending.clear(); // runCommand sets it again if still incomplete
+            runCommand(full, termState);
             termState.input.clear();
             termState.cursor = 0;
             termState.scroll = 0;
             break;
+        }
 
         case XK_BackSpace:
             if (termState.input.length() > 0 && termState.cursor > 0)
