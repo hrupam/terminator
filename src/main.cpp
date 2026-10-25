@@ -119,6 +119,63 @@ TerminalState &getCurrTab()
     return tabs[currentTab];
 }
 
+bool tokenize(const string &s, TerminalState &ts, vector<Token> &out); // defined below
+
+// Runs one command (no pipes inside), waits for it, returns what it printed.
+string captureOutput(const string &cmd, TerminalState &ts)
+{
+    vector<Token> toks;
+    if (!tokenize(cmd, ts, toks) || toks.empty())
+        return "";
+
+    vector<string> words;
+    for (Token &t : toks)
+        words.push_back(t.text);
+    vector<char *> argv;
+    for (string &w : words)
+        argv.push_back(w.data());
+    argv.push_back(nullptr);
+    string notFound = "terminator: " + words[0] + ": command not found\n";
+
+    int p[2];
+    if (pipe2(p, O_CLOEXEC) < 0)
+        return "";
+
+    pid_t pid = fork();
+    if (pid == 0) // child
+    {
+        int dn = open("/dev/null", O_RDONLY);
+        dup2(dn, STDIN_FILENO);
+        close(dn);
+        dup2(p[1], STDOUT_FILENO);
+        dup2(p[1], STDERR_FILENO);
+        chdir(ts.cwd.c_str());
+        execvp(argv[0], argv.data());
+        write(STDERR_FILENO, notFound.c_str(), notFound.size());
+        _exit(127);
+    }
+
+    close(p[1]); // MUST: otherwise read() below never returns 0
+
+    string out;
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(p[0], buf, sizeof(buf))) > 0)
+        out.append(buf, r);
+    close(p[0]);
+
+    if (pid > 0)
+    {
+        int st;
+        waitpid(pid, &st, 0);
+        ts.lastStatus = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    }
+
+    while (!out.empty() && out.back() == '\n')
+        out.pop_back(); // bash removes trailing newlines
+    return out;
+}
+
 // i points at '$'. Appends the expansion to cur and advances i.
 bool expandDollar(const string &s, size_t &i, TerminalState &ts, string &cur)
 {
@@ -131,8 +188,25 @@ bool expandDollar(const string &s, size_t &i, TerminalState &ts, string &cur)
     }
     else if (i < n && s[i] == '(')
     {
-        // step 3: find the matching ')', run the inside, append its output
-        // for now: return true without appending anything
+        int depth = 0;
+        size_t j = i;
+        for (; j < n; j++)
+        {
+            if (s[j] == '(')
+                depth++;
+            else if (s[j] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    break;
+            }
+        }
+        if (j >= n)
+            return false; // unclosed $( : multiline prompt, like an unclosed quote
+
+        string inner = s.substr(i + 1, j - i - 1);
+        cur += captureOutput(inner, ts);
+        i = j + 1; // continue after the ')'
     }
     else if (i < n && s[i] == '{')
     {
