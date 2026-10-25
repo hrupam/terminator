@@ -31,12 +31,19 @@ unsigned long namedColor(const char *name, unsigned long fallback)
     return fallback;
 }
 
+struct Token
+{
+    string text;
+    bool isOp = false; // unquoted | < > >>
+};
+
 class TerminalState
 {
 public:
     vector<string> lines;    /* finished output lines */
     string partial;          /* output line still being written (no \n yet) */
     string input;            /* the line being typed */
+    string pending;          // unfinished input waiting for more lines, "" if none
     int cursor = 0;          /* length and cursor position in input */
     int scroll = 0;          /* how many lines scrolled back, 0 = bottom */
     string prompt;           /* "user@terminator> " or "> " */
@@ -110,6 +117,236 @@ bool appRunning = true;
 TerminalState &getCurrTab()
 {
     return tabs[currentTab];
+}
+
+bool tokenize(const string &s, TerminalState &ts, vector<Token> &out); // defined below
+
+// Runs one command (no pipes inside), waits for it, returns what it printed.
+string captureOutput(const string &cmd, TerminalState &ts)
+{
+    vector<Token> toks;
+    if (!tokenize(cmd, ts, toks) || toks.empty())
+        return "";
+
+    vector<string> words;
+    for (Token &t : toks)
+        words.push_back(t.text);
+    vector<char *> argv;
+    for (string &w : words)
+        argv.push_back(w.data());
+    argv.push_back(nullptr);
+    string notFound = "terminator: " + words[0] + ": command not found\n";
+
+    int p[2];
+    if (pipe2(p, O_CLOEXEC) < 0)
+        return "";
+
+    pid_t pid = fork();
+    if (pid == 0) // child
+    {
+        int dn = open("/dev/null", O_RDONLY);
+        dup2(dn, STDIN_FILENO);
+        close(dn);
+        dup2(p[1], STDOUT_FILENO);
+        dup2(p[1], STDERR_FILENO);
+        chdir(ts.cwd.c_str());
+        execvp(argv[0], argv.data());
+        write(STDERR_FILENO, notFound.c_str(), notFound.size());
+        _exit(127);
+    }
+
+    close(p[1]); // MUST: otherwise read() below never returns 0
+
+    string out;
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(p[0], buf, sizeof(buf))) > 0)
+        out.append(buf, r);
+    close(p[0]);
+
+    if (pid > 0)
+    {
+        int st;
+        waitpid(pid, &st, 0);
+        ts.lastStatus = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    }
+
+    while (!out.empty() && out.back() == '\n')
+        out.pop_back(); // bash removes trailing newlines
+    return out;
+}
+
+// i points at '$'. Appends the expansion to cur and advances i.
+bool expandDollar(const string &s, size_t &i, TerminalState &ts, string &cur)
+{
+    size_t n = s.size();
+    i++; // skip '$'
+    if (i < n && s[i] == '?')
+    {
+        cur += to_string(ts.lastStatus);
+        i++;
+    }
+    else if (i < n && s[i] == '(')
+    {
+        int depth = 0;
+        size_t j = i;
+        for (; j < n; j++)
+        {
+            if (s[j] == '(')
+                depth++;
+            else if (s[j] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    break;
+            }
+        }
+        if (j >= n)
+            return false; // unclosed $( : multiline prompt, like an unclosed quote
+
+        string inner = s.substr(i + 1, j - i - 1);
+        cur += captureOutput(inner, ts);
+        i = j + 1; // continue after the ')'
+    }
+    else if (i < n && s[i] == '{')
+    {
+        size_t j = s.find('}', i);
+        if (j == string::npos)
+            return false; // unclosed ${
+        const char *v = getenv(s.substr(i + 1, j - i - 1).c_str());
+        if (v)
+            cur += v;
+        i = j + 1;
+    }
+    else if (i < n && (isalpha(s[i]) || s[i] == '_'))
+    {
+        size_t j = i;
+        while (j < n && (isalnum(s[j]) || s[j] == '_'))
+            j++;
+        const char *v = getenv(s.substr(i, j - i).c_str());
+        if (v)
+            cur += v;
+        i = j;
+    }
+    else
+        cur += '$'; // lone $ stays literal: echo 5$
+    return true;
+}
+
+bool tokenize(const string &s, TerminalState &ts, vector<Token> &out)
+{
+    out.clear();
+    string cur;
+    bool inWord = false;
+    size_t i = 0, n = s.size();
+
+    auto endWord = [&]()
+    {
+        if (inWord)
+            out.push_back({cur, false});
+        cur.clear();
+        inWord = false;
+    };
+
+    while (i < n)
+    {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n')
+        {
+            endWord();
+            i++;
+        }
+        else if (c == '|' || c == '<')
+        {
+            endWord();
+            out.push_back({string(1, c), true});
+            i++;
+        }
+        else if (c == '>')
+        {
+            endWord();
+            if (i + 1 < n && s[i + 1] == '>')
+            {
+                out.push_back({">>", true});
+                i += 2;
+            }
+            else
+            {
+                out.push_back({">", true});
+                i++;
+            }
+        }
+        else if (c == '\\')
+        {
+            if (i + 1 >= n)
+                return false;     // trailing \ : wants another line
+            if (s[i + 1] != '\n') // "\<newline>" = line continuation, adds nothing
+            {
+                cur += s[i + 1];
+                inWord = true;
+            }
+            i += 2;
+        }
+        else if (c == '\'')
+        {
+            size_t j = s.find('\'', i + 1);
+            if (j == string::npos)
+                return false; // unclosed '
+            cur += s.substr(i + 1, j - i - 1);
+            inWord = true;
+            i = j + 1;
+        }
+        else if (c == '"')
+        {
+            inWord = true;
+            i++;
+            while (true)
+            {
+                if (i >= n)
+                    return false; // unclosed "
+                char d = s[i];
+                if (d == '"')
+                {
+                    i++;
+                    break;
+                }
+                if (d == '\\' && i + 1 < n && strchr("\"\\$\n", s[i + 1]))
+                {
+                    if (s[i + 1] != '\n')
+                        cur += s[i + 1];
+                    i += 2;
+                }
+                else if (d == '$')
+                {
+                    if (!expandDollar(s, i, ts, cur))
+                        return false;
+                }
+                else
+                {
+                    cur += d;
+                    i++;
+                }
+            }
+        }
+        else if (c == '$')
+        {
+            if (!expandDollar(s, i, ts, cur))
+                return false;
+            if (!cur.empty())
+                inWord = true; // unquoted empty $X gives no argument, like bash
+        }
+        else
+        {
+            cur += c;
+            inWord = true;
+            i++;
+        }
+    }
+    endWord();
+
+    if (!out.empty() && out.back().isOp && out.back().text == "|")
+        return false; // trailing | : wants another line
+    return true;
 }
 
 void drawTabBar(int lineHeight, int charw)
@@ -208,10 +445,11 @@ void redraw(void)
         }
         else // the prompt line
         {
-            string displayText = termState.prompt + termState.input;
+            string p = termState.pending.empty() ? termState.prompt : "> ";
+            string displayText = p + termState.input;
             XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
 
-            int col = termState.prompt.size() + termState.cursor;
+            int col = p.size() + termState.cursor;
             XSetForeground(disp, gc, accentColor); // cursor in accent colour
             XFillRectangle(disp, win, gc, 4 + col * charw, y + 1, charw, 2);
             XSetForeground(disp, gc, fgColor);
@@ -313,51 +551,22 @@ int builtinCd(vector<string> &words, TerminalState &termState)
 
 void runCommand(const string &str, TerminalState &termState)
 {
-    string cmd = processCommand(str); // removes whitespaces
-
-    if (cmd.empty())
-        return;
-
-    stringstream ss(cmd);
-    vector<string> words;
-    for (string token; ss >> token;)
-        words.push_back(token);
-
-    for (string &w : words)
+    vector<Token> toks;
+    if (!tokenize(str, termState, toks))
     {
-        if (w == "$?")
-            w = to_string(termState.lastStatus);
+        termState.pending = str;
+        return;
     }
+    if (toks.empty())
+        return;
 
     vector<CommandStage> stages;
     CommandStage currStage;
-    for (size_t i = 0; i < words.size(); i++)
+    for (size_t i = 0; i < toks.size(); i++)
     {
-        string w = words[i];
-        if (w != "|")
-        {
-            if (w == ">" || w == ">>" || w == "<")
-            {
-                if (i + 1 >= words.size())
-                {
-                    termState.appendOutput("terminator: syntax error: missing file after " + w + "\n");
-                    termState.lastStatus = 2;
-                    return;
-                }
-                if (w == "<")
-                    currStage.inFile = words[i + 1];
-                else
-                {
-                    currStage.outFile = words[i + 1];
-                    if (w == ">>")
-                        currStage.isAppendMode = true;
-                }
-                i++;
-            }
-            else
-                currStage.words.push_back(w);
-        }
-        else
+        Token &t = toks[i];
+
+        if (t.isOp && t.text == "|")
         {
             if (currStage.words.empty())
             {
@@ -368,6 +577,25 @@ void runCommand(const string &str, TerminalState &termState)
             stages.push_back(currStage);
             currStage = CommandStage();
         }
+        else if (t.isOp) // < > >>
+        {
+            if (i + 1 >= toks.size() || toks[i + 1].isOp)
+            {
+                termState.appendOutput("terminator: syntax error: missing file after " + t.text + "\n");
+                termState.lastStatus = 2;
+                return;
+            }
+            if (t.text == "<")
+                currStage.inFile = toks[i + 1].text;
+            else
+            {
+                currStage.outFile = toks[i + 1].text;
+                currStage.isAppendMode = (t.text == ">>");
+            }
+            i++; // skip the filename
+        }
+        else // a normal word
+            currStage.words.push_back(t.text);
     }
     if (currStage.words.empty() && !stages.empty())
     {
@@ -655,14 +883,19 @@ void handleEvent(XEvent &ev)
         switch (keysym)
         {
         case XK_Return:
+        {
             if (termState.busy)
                 break;
-            termState.lines.push_back(termState.prompt + termState.input);
-            runCommand(termState.input, termState);
+            bool cont = !termState.pending.empty();
+            termState.lines.push_back((cont ? "> " : termState.prompt) + termState.input);
+            string full = cont ? termState.pending + "\n" + termState.input : termState.input;
+            termState.pending.clear(); // runCommand sets it again if still incomplete
+            runCommand(full, termState);
             termState.input.clear();
             termState.cursor = 0;
             termState.scroll = 0;
             break;
+        }
 
         case XK_BackSpace:
             if (termState.input.length() > 0 && termState.cursor > 0)
