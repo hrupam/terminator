@@ -127,24 +127,56 @@ void runCommand(const string &str, TerminalState &termState)
 
     int n = stages.size();
 
-    if (n == 1 && stages[0].words[0] == "exit")
+    // only one stage and special commands
+    if (n == 1)
     {
-        termState.isRunning = false;
-        return;
-    }
+        if (stages[0].words[0] == "exit")
+        {
+            termState.isRunning = false;
+            return;
+        }
 
-    if (n == 1 && stages[0].words[0] == "cd")
-    {
-        termState.lastStatus = builtinCd(stages[0].words, termState);
-        return;
-    }
+        if (stages[0].words[0] == "cd")
+        {
+            termState.lastStatus = builtinCd(stages[0].words, termState);
+            return;
+        }
 
-    if (n == 1 && stages[0].words[0] == "clear")
-    {
-        termState.lines.clear();
-        termState.partial.clear();
-        termState.lastStatus = 0;
-        return;
+        if (stages[0].words[0] == "clear")
+        {
+            termState.lines.clear();
+            termState.partial.clear();
+            termState.lastStatus = 0;
+            return;
+        }
+
+        if (stages[0].words[0] == "jobs")
+        {
+            int jobsCount = termState.jobs.size();
+            for (int i = 0; i < jobsCount; i++)
+            {
+                Job &j = termState.jobs[i];
+
+                if (i == jobsCount - 1)
+                    termState.appendOutput("[" + to_string(j.id) + "]+  " +
+                                           (j.stopped ? "Stopped" : "Running") +
+                                           "                 " + j.cmd + "\n");
+                else if (i == jobsCount - 2)
+                {
+                    termState.appendOutput("[" + to_string(j.id) + "]-  " +
+                                           (j.stopped ? "Stopped" : "Running") +
+                                           "                 " + j.cmd + "\n");
+                }
+                else
+                {
+                    termState.appendOutput("[" + to_string(j.id) + "]  " +
+                                           (j.stopped ? "Stopped" : "Running") +
+                                           "                 " + j.cmd + "\n");
+                }
+            }
+            termState.lastStatus = 0;
+            return;
+        }
     }
 
     auto resolve = [&](const string &f)
@@ -293,6 +325,7 @@ void runCommand(const string &str, TerminalState &termState)
     termState.pgid = pgid;
     termState.childPids = pids;
     termState.busy = true;
+    termState.cmdText = str;
 }
 
 void finishCommand(TerminalState &termState)

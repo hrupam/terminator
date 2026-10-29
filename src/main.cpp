@@ -76,6 +76,10 @@ int main(void)
             redraw();
     }
 
+    // Kill all tab processes before closing the terminal
+    for (TerminalState &tab : tabs)
+        killTabProcesses(tab);
+
     closeTerminal();
 
     return 0;

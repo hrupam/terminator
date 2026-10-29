@@ -3,6 +3,17 @@
 #include <vector>
 #include <sys/types.h>
 
+// A stopped or background command: a process group this tab still owns.
+struct Job
+{
+    int id;                  // the [1], [2] number
+    pid_t pgid;              // its process group
+    std::vector<pid_t> pids; // every process in it
+    int outFd;               // read end of its output pipe (still open)
+    std::string cmd;         // command text, for the jobs list
+    bool stopped;            // true = Stopped, false = Running in background
+};
+
 // Everything one tab needs: its screen text, input line, cwd and running command.
 class TerminalState
 {
@@ -21,6 +32,10 @@ public:
     std::vector<pid_t> childPids;   // every process in the running pipeline
     pid_t pgid = -1;                // their process group (= first child's pid)
     bool busy = false;              // a command is running: don't draw the prompt
+
+    std::string cmdText;   // text of the foreground command (for job listings)
+    std::vector<Job> jobs; // stopped / background jobs of this tab
+    int nextJobId = 1;
 
     void appendInput(const std::string &s);
     void appendOutput(const std::string &data);

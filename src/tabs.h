@@ -10,3 +10,4 @@ TerminalState &getCurrTab();
 void newTab();
 void closeTab(int tabIndex);
 bool closeTabsBasedOnRunning(); // closes tabs that ran "exit"; true if any closed
+void killTabProcesses(TerminalState &tab);

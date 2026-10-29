@@ -4,6 +4,8 @@
 #include "executor.h"
 #include <X11/Xutil.h>
 #include <string>
+#include <unistd.h>
+#include <csignal>
 
 using namespace std;
 
@@ -55,6 +57,64 @@ void handleEvent(XEvent &ev)
             closeTab(currentTab);
             if (appRunning)
                 redraw();
+            return;
+        }
+        if (ctrl && (keysym == XK_C || keysym == XK_c))
+        {
+            TerminalState &ts = getCurrTab();
+            if (ts.busy)
+            {
+                if (ts.pgid > 0)
+                    kill(-ts.pgid, SIGINT);
+
+                ts.partial += "^C";
+                ts.appendOutput("\n");
+            }
+            else
+            {
+                string p = ts.pending.empty() ? ts.prompt : "> ";
+                ts.lines.push_back(p + ts.input + "^C");
+                ts.input.clear();
+                ts.cursor = 0;
+                ts.pending.clear(); // cancels a half-typed multiline command
+                ts.lastStatus = 130;
+            }
+            ts.scroll = 0;
+            redraw();
+            return;
+        }
+
+        // Ctrl+Z: stop the running command and turn it into a job
+        if (ctrl && (keysym == XK_Z || keysym == XK_z))
+        {
+            TerminalState &ts = getCurrTab();
+            if (ts.busy && ts.pgid > 0)
+            {
+                kill(-ts.pgid, SIGTSTP); // whole pipeline stops
+
+                if (ts.jobs.empty())
+                    ts.nextJobId = 1; // like bash: numbering restarts when no jobs remain
+                Job job;
+                job.id = ts.nextJobId++;
+                job.pgid = ts.pgid;
+                job.pids = ts.childPids;
+                job.outFd = ts.outFd;
+                job.cmd = ts.cmdText;
+                job.stopped = true;
+                ts.jobs.push_back(job);
+
+                ts.partial += "^Z";
+                ts.appendOutput("\n[" + to_string(job.id) + "]+  Stopped                 " + job.cmd + "\n");
+
+                // the tab no longer runs it in the foreground: give the prompt back
+                ts.outFd = -1;
+                ts.childPids.clear();
+                ts.pgid = -1;
+                ts.busy = false;
+                ts.lastStatus = 148; // 128 + SIGTSTP (20), like bash
+            }
+            ts.scroll = 0;
+            redraw();
             return;
         }
 

@@ -26,14 +26,7 @@ void newTab()
 void closeTab(int tabIndex)
 {
     TerminalState &tab = tabs[tabIndex];
-    if (tab.busy)
-    {
-        if (tab.pgid > 0)
-            kill(-tab.pgid, SIGHUP);
-        close(tab.outFd);
-        for (pid_t chpid : tab.childPids)
-            waitpid(chpid, nullptr, 0);
-    }
+    killTabProcesses(tab);
 
     int n = tabs.size();
     if (n == 1)
@@ -62,4 +55,28 @@ bool closeTabsBasedOnRunning()
         }
     }
     return isClosed;
+}
+
+void killTabProcesses(TerminalState &tab)
+{
+    if (tab.busy)
+    {
+        if (tab.pgid > 0)
+            kill(-tab.pgid, SIGHUP);
+
+        close(tab.outFd);
+        for (pid_t chpid : tab.childPids)
+            waitpid(chpid, nullptr, 0);
+        tab.busy = false;
+    }
+
+    for (Job &job : tab.jobs)
+    {
+        kill(-job.pgid, SIGHUP);
+        kill(-job.pgid, SIGCONT);
+        close(job.outFd);
+        for (pid_t pid : job.pids)
+            waitpid(pid, nullptr, 0);
+    }
+    tab.jobs.clear();
 }
