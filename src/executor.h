@@ -18,3 +18,5 @@ void runCommand(const std::string &str, TerminalState &termState);
 
 // Called when outFd hits EOF: reaps the children and sets $?.
 void finishCommand(TerminalState &termState);
+
+void finishJob(TerminalState &ts, size_t k);

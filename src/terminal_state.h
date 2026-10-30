@@ -36,6 +36,7 @@ public:
     std::string cmdText;   // text of the foreground command (for job listings)
     std::vector<Job> jobs; // stopped / background jobs of this tab
     int nextJobId = 1;
+    int fgJobId = 0; // job number of the foreground command if it came from fg, else 0
 
     void appendInput(const std::string &s);
     void appendOutput(const std::string &data);

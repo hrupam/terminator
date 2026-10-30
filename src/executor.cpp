@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <csignal>
+#include <algorithm>
 
 using namespace std;
 
@@ -64,6 +66,37 @@ static int builtinCd(vector<string> &words, TerminalState &termState)
     termState.setPrompt();
 
     return 0;
+}
+
+// bash's current job (+): the most recently stopped job; if none is stopped, the most recent job.
+// skip: an index to ignore (used to find the previous job, marked -).
+static int currentJob(const TerminalState &ts, int skip = -1)
+{
+    for (int i = (int)ts.jobs.size() - 1; i >= 0; i--)
+        if (i != skip && ts.jobs[i].stopped)
+            return i;
+    for (int i = (int)ts.jobs.size() - 1; i >= 0; i--)
+        if (i != skip)
+            return i;
+    return -1;
+}
+
+// "fg" -> the current job (last in the list); "fg %2" or "fg 2" -> job 2.
+// Returns its index in ts.jobs, or -1.
+static int findJob(TerminalState &ts, vector<string> &words)
+{
+    if (ts.jobs.empty())
+        return -1;
+    if (words.size() < 2)
+        return currentJob(ts);
+    string a = words[1];
+    if (!a.empty() && a[0] == '%')
+        a = a.substr(1);
+    int id = atoi(a.c_str());
+    for (size_t i = 0; i < ts.jobs.size(); i++)
+        if (ts.jobs[i].id == id)
+            return i;
+    return -1;
 }
 
 void runCommand(const string &str, TerminalState &termState)
@@ -152,27 +185,69 @@ void runCommand(const string &str, TerminalState &termState)
 
         if (stages[0].words[0] == "jobs")
         {
-            int jobsCount = termState.jobs.size();
-            for (int i = 0; i < jobsCount; i++)
+            int cur = currentJob(termState);
+            int prev = currentJob(termState, cur);
+
+            // the list is in recency order; bash prints by job number
+            vector<int> order(termState.jobs.size());
+            for (size_t i = 0; i < order.size(); i++)
+                order[i] = i;
+            sort(order.begin(), order.end(), [&](int a, int b)
+                 { return termState.jobs[a].id < termState.jobs[b].id; });
+
+            for (int i : order)
             {
                 Job &j = termState.jobs[i];
+                char mark = (i == cur) ? '+' : (i == prev) ? '-'
+                                                           : ' ';
+                termState.appendOutput("[" + to_string(j.id) + "]" + mark + "  " +
+                                       (j.stopped ? "Stopped" : "Running") +
+                                       "                 " + j.cmd + (j.stopped ? "" : " &") + "\n");
+            }
+            termState.lastStatus = 0;
+            return;
+        }
 
-                if (i == jobsCount - 1)
-                    termState.appendOutput("[" + to_string(j.id) + "]+  " +
-                                           (j.stopped ? "Stopped" : "Running") +
-                                           "                 " + j.cmd + "\n");
-                else if (i == jobsCount - 2)
-                {
-                    termState.appendOutput("[" + to_string(j.id) + "]-  " +
-                                           (j.stopped ? "Stopped" : "Running") +
-                                           "                 " + j.cmd + "\n");
-                }
-                else
-                {
-                    termState.appendOutput("[" + to_string(j.id) + "]  " +
-                                           (j.stopped ? "Stopped" : "Running") +
-                                           "                 " + j.cmd + "\n");
-                }
+        if (stages[0].words[0] == "fg")
+        {
+            int k = findJob(termState, stages[0].words);
+            if (k < 0)
+            {
+                termState.appendOutput("terminator: fg: no such job\n");
+                termState.lastStatus = 1;
+                return;
+            }
+            Job job = termState.jobs[k];
+            termState.jobs.erase(termState.jobs.begin() + k);
+
+            termState.appendOutput(job.cmd + "\n"); // bash prints the command it resumes
+            termState.outFd = job.outFd;
+            termState.childPids = job.pids;
+            termState.pgid = job.pgid;
+            termState.cmdText = job.cmd;
+            termState.fgJobId = job.id;
+            termState.busy = true;
+            kill(-job.pgid, SIGCONT); // wake the whole group
+            return;
+        }
+
+        if (stages[0].words[0] == "bg")
+        {
+            int k = findJob(termState, stages[0].words);
+            if (k < 0)
+            {
+                termState.appendOutput("terminator: bg: no such job\n");
+                termState.lastStatus = 1;
+                return;
+            }
+            Job &job = termState.jobs[k];
+            if (!job.stopped)
+                termState.appendOutput("terminator: bg: job " + to_string(job.id) + " already in background\n");
+            else
+            {
+                job.stopped = false;
+                kill(-job.pgid, SIGCONT);
+                termState.appendOutput("[" + to_string(job.id) + "]+ " + job.cmd + " &\n");
             }
             termState.lastStatus = 0;
             return;
@@ -326,6 +401,7 @@ void runCommand(const string &str, TerminalState &termState)
     termState.childPids = pids;
     termState.busy = true;
     termState.cmdText = str;
+    termState.fgJobId = 0;
 }
 
 void finishCommand(TerminalState &termState)
@@ -353,4 +429,27 @@ void finishCommand(TerminalState &termState)
     termState.childPids.clear();
     termState.pgid = -1;
     termState.busy = false;
+    termState.fgJobId = 0;
+}
+
+// A background/stopped job's pipe hit EOF: reap it, print Done/Exit, drop it.
+void finishJob(TerminalState &ts, size_t k)
+{
+    Job job = ts.jobs[k];
+    ts.jobs.erase(ts.jobs.begin() + k);
+
+    close(job.outFd);
+    int status = 0;
+    for (pid_t p : job.pids)
+        waitpid(p, &status, 0); // status ends up as the last stage's
+
+    string state;
+    if (WIFEXITED(status))
+        state = WEXITSTATUS(status) == 0 ? "Done" : "Exit " + to_string(WEXITSTATUS(status));
+    else
+        state = "Terminated";
+
+    if (!ts.partial.empty())
+        ts.appendOutput("\n"); // don't glue onto a half-printed line
+    ts.appendOutput("[" + to_string(job.id) + "]   " + state + "                    " + job.cmd + "\n");
 }

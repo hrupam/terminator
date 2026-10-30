@@ -92,10 +92,11 @@ void handleEvent(XEvent &ev)
             {
                 kill(-ts.pgid, SIGTSTP); // whole pipeline stops
 
-                if (ts.jobs.empty())
-                    ts.nextJobId = 1; // like bash: numbering restarts when no jobs remain
+                if (ts.jobs.empty() && ts.fgJobId == 0)
+                    ts.nextJobId = 1;
                 Job job;
-                job.id = ts.nextJobId++;
+                job.id = ts.fgJobId > 0 ? ts.fgJobId : ts.nextJobId++; // keep [n] if it came from fg
+                ts.fgJobId = 0;
                 job.pgid = ts.pgid;
                 job.pids = ts.childPids;
                 job.outFd = ts.outFd;

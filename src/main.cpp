@@ -44,7 +44,7 @@ int main(void)
 
         vector<pollfd> fds;
         fds.push_back({xfd, POLLIN, 0});
-        vector<int> fdTab;
+        vector<int> fdTab; // which tab each fd belongs to
         for (size_t i = 0; i < tabs.size(); i++)
         {
             if (tabs[i].outFd != -1)
@@ -52,25 +52,46 @@ int main(void)
                 fds.push_back({tabs[i].outFd, POLLIN, 0});
                 fdTab.push_back(i);
             }
+            for (Job &j : tabs[i].jobs) // background (and stopped) jobs
+            {
+                fds.push_back({j.outFd, POLLIN, 0});
+                fdTab.push_back(i);
+            }
         }
 
         poll(fds.data(), fds.size(), -1);
 
-        // to handle child's command execution in Tabs
         bool changed = false;
         for (size_t k = 1; k < fds.size(); k++)
         {
-            if (fds[k].revents & (POLLIN | POLLHUP))
+            if (!(fds[k].revents & (POLLIN | POLLHUP)))
+                continue;
+            TerminalState &tab = tabs[fdTab[k - 1]];
+            int fd = fds[k].fd;
+            char buffer[4096];
+
+            if (fd == tab.outFd) // the foreground command
             {
-                char buffer[4096];
-                TerminalState &tab = tabs[fdTab[k - 1]];
-                ssize_t n = read(tab.outFd, buffer, sizeof(buffer));
+                ssize_t n = read(fd, buffer, sizeof(buffer));
                 if (n > 0)
                     tab.appendOutput(string(buffer, n));
                 else if (n == 0 || errno != EINTR)
                     finishCommand(tab);
-                changed = true;
             }
+            else // a job: find it by its fd
+            {
+                size_t j = 0;
+                while (j < tab.jobs.size() && tab.jobs[j].outFd != fd)
+                    j++;
+                if (j == tab.jobs.size())
+                    continue; // already gone
+                ssize_t n = read(fd, buffer, sizeof(buffer));
+                if (n > 0)
+                    tab.appendOutput(string(buffer, n));
+                else if (n == 0 || errno != EINTR)
+                    finishJob(tab, j);
+            }
+            changed = true;
         }
         if (changed)
             redraw();
