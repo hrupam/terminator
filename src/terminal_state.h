@@ -48,6 +48,10 @@ public:
     std::string ctlBuf;    // GUI: ctl bytes read but not yet a whole message
     pid_t enginePid = -1;  // GUI, process mode: the tab process
 
+    /* HISTORY */
+    int histPos = -1;      // GUI: index into history while browsing with Up/Down; -1 = not browsing
+    std::string histDraft; // GUI: the line being typed before Up was pressed
+
     void appendInput(const std::string &s);
     void appendOutput(const std::string &data); // engine copy: sends the text to the GUI
     void sendCtl(const std::string &msg);       // engine copy: one control message

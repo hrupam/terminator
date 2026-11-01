@@ -16,6 +16,7 @@ vector<TerminalState> tabs;
 int currentTab = 0;
 bool appRunning = true;
 bool useProcess = false;
+vector<string> history; // every command typed in any tab, oldest first
 
 TerminalState &getCurrTab()
 {

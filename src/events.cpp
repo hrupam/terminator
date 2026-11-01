@@ -5,8 +5,152 @@
 #include <string>
 #include <unistd.h>
 #include <csignal>
+#include "keys.h"
 
 using namespace std;
+
+static void handleAction(Action action)
+{
+    switch (action)
+    {
+    case ACT_NEW_TAB:
+        newTab(getCurrTab().cwd);
+        break;
+
+    case ACT_NEXT_TAB:
+        currentTab = (currentTab + 1) % tabs.size();
+        break;
+
+    case ACT_PREV_TAB:
+        currentTab = (currentTab == 0) ? tabs.size() - 1 : currentTab - 1;
+        break;
+
+    case ACT_CLOSE_TAB:
+        closeTab(currentTab);
+        if (!appRunning)
+            return; // last tab closed: nothing left to draw
+        break;
+
+    case ACT_INTERRUPT: // Ctrl+C
+    {
+        TerminalState &ts = getCurrTab();
+        if (ts.busy)
+        {
+            if (ts.pgid > 0)
+                kill(-ts.pgid, SIGINT);
+            ts.partial += "^C";
+            ts.appendOutput("\n");
+        }
+        else
+        {
+            string p = ts.more ? "> " : ts.prompt;
+            ts.lines.push_back(p + ts.input + "^C");
+            ts.input.clear();
+            ts.cursor = 0;
+            ts.more = false;
+            sendToEngine(ts, "K");
+        }
+        ts.scroll = 0;
+        break;
+    }
+
+    case ACT_SUSPEND: // Ctrl+Z
+    {
+        TerminalState &ts = getCurrTab();
+        if (ts.busy && ts.pgid > 0)
+        {
+            kill(-ts.pgid, SIGTSTP);
+            ts.partial += "^Z";
+            ts.appendOutput("\n");
+        }
+        ts.scroll = 0;
+        break;
+    }
+
+    // ---- line editing ----
+    case ACT_LINE_START: // Ctrl+A
+        getCurrTab().cursor = 0;
+        break;
+
+    case ACT_LINE_END: // Ctrl+E
+        getCurrTab().cursor = getCurrTab().input.size();
+        break;
+
+    case ACT_KILL_START: // Ctrl+U: delete from the start up to the cursor
+    {
+        TerminalState &ts = getCurrTab();
+        ts.input.erase(0, ts.cursor);
+        ts.cursor = 0;
+        break;
+    }
+
+    case ACT_KILL_END: // Ctrl+K: delete from the cursor to the end
+    {
+        TerminalState &ts = getCurrTab();
+        ts.input.erase(ts.cursor);
+        break;
+    }
+
+    case ACT_DEL_WORD: // Ctrl+W: skip spaces backwards, then the word, delete that range
+    {
+        TerminalState &ts = getCurrTab();
+        int start = ts.cursor;
+        while (start > 0 && ts.input[start - 1] == ' ')
+            start--;
+        while (start > 0 && ts.input[start - 1] != ' ')
+            start--;
+        ts.input.erase(start, ts.cursor - start);
+        ts.cursor = start;
+        break;
+    }
+
+    case ACT_CLEAR: // Ctrl+L: clear the screen, keep the line being typed
+    {
+        TerminalState &ts = getCurrTab();
+        ts.lines.clear();
+        ts.scroll = 0;
+        break;
+    }
+
+    case ACT_HIST_PREV: // Up: one command older
+    {
+        if (history.empty())
+            break;
+        TerminalState &ts = getCurrTab();
+        if (ts.histPos == -1) // start browsing: remember what was being typed
+        {
+            ts.histDraft = ts.input;
+            ts.histPos = history.size(); // one past the newest; the line below moves onto it
+        }
+        if (ts.histPos > 0)
+            ts.histPos--;               // move first...
+        ts.input = history[ts.histPos]; // ...then show: histPos = what is on screen
+        ts.cursor = ts.input.size();
+        break;
+    }
+
+    case ACT_HIST_NEXT:
+    {
+        TerminalState &ts = getCurrTab();
+        if (ts.histPos == -1)
+            break; // not browsing
+        ts.histPos++;
+        if (ts.histPos >= (int)history.size())
+        {
+            ts.input = ts.histDraft;
+            ts.histPos = -1;
+        }
+        else
+            ts.input = history[ts.histPos];
+        ts.cursor = ts.input.size();
+        break;
+    }
+
+    default:
+        break;
+    }
+    redraw();
+}
 
 void handleEvent(XEvent &ev)
 {
@@ -23,78 +167,10 @@ void handleEvent(XEvent &ev)
         KeySym keysym;
         int len = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
 
-        unsigned mods = ev.xkey.state & (ControlMask | ShiftMask);
-        bool ctrl = mods & ControlMask;
-        bool ctrlShift = mods == (ControlMask | ShiftMask);
-
-        // Ctrl+Shift+T: create tab
-        if (ctrlShift && (keysym == XK_T || keysym == XK_t))
+        Action act = findAction(ev.xkey);
+        if (act != ACT_NONE)
         {
-            newTab(getCurrTab().cwd);
-            redraw();
-            return;
-        }
-        // Ctrl+Right: next tab
-        if (ctrl && keysym == XK_Right)
-        {
-            currentTab = (currentTab + 1) % tabs.size();
-            redraw();
-            return;
-        }
-        // Ctrl+Left: previous tab
-        if (ctrl && keysym == XK_Left)
-        {
-            if (currentTab == 0)
-                currentTab = tabs.size() - 1;
-            else
-                currentTab--;
-            redraw();
-            return;
-        }
-        if (ctrl && (keysym == XK_D || keysym == XK_d))
-        {
-            closeTab(currentTab);
-            if (appRunning)
-                redraw();
-            return;
-        }
-        if (ctrl && (keysym == XK_C || keysym == XK_c))
-        {
-            TerminalState &ts = getCurrTab();
-            if (ts.busy)
-            {
-                if (ts.pgid > 0)
-                    kill(-ts.pgid, SIGINT);
-
-                ts.partial += "^C";
-                ts.appendOutput("\n");
-            }
-            else
-            {
-                string p = ts.more ? "> " : ts.prompt;
-                ts.lines.push_back(p + ts.input + "^C");
-                ts.input.clear();
-                ts.cursor = 0;
-                ts.more = false;
-                sendToEngine(ts, "K"); // engine drops its half-typed multiline command, $? = 130
-            }
-            ts.scroll = 0;
-            redraw();
-            return;
-        }
-
-        // Ctrl+Z: stop the running command and turn it into a job
-        if (ctrl && (keysym == XK_Z || keysym == XK_z))
-        {
-            TerminalState &ts = getCurrTab();
-            if (ts.busy && ts.pgid > 0)
-            {
-                kill(-ts.pgid, SIGTSTP); // whole pipeline stops; the engine turns it into a job
-                ts.partial += "^Z";
-                ts.appendOutput("\n");
-            }
-            ts.scroll = 0;
-            redraw();
+            handleAction(act);
             return;
         }
 
@@ -105,6 +181,11 @@ void handleEvent(XEvent &ev)
         {
             if (termState.busy)
                 break;
+            if (!termState.input.empty() &&
+                (history.empty() || history.back() != termState.input))
+                history.push_back(termState.input);
+            termState.histPos = -1;
+
             termState.lines.push_back((termState.more ? "> " : termState.prompt) + termState.input);
             sendToEngine(termState, "L " + termState.input); // the engine runs it
             termState.busy = true;                           // until the engine answers R or M

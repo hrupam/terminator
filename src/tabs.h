@@ -6,7 +6,8 @@
 extern std::vector<TerminalState> tabs; // the GUI copies
 extern int currentTab;
 extern bool appRunning;
-extern bool useProcess; // false = thread mode (default), true = process mode
+extern bool useProcess;                  // false = thread mode (default), true = process mode
+extern std::vector<std::string> history; // every command typed in any tab, oldest first
 
 TerminalState &getCurrTab();
 void newTab(const std::string &cwd); // starts the tab's engine as a thread or a process
