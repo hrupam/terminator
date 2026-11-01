@@ -1,7 +1,6 @@
 #include "events.h"
 #include "gui.h"
 #include "tabs.h"
-#include "executor.h"
 #include <X11/Xutil.h>
 #include <string>
 #include <unistd.h>
@@ -31,7 +30,7 @@ void handleEvent(XEvent &ev)
         // Ctrl+Shift+T: create tab
         if (ctrlShift && (keysym == XK_T || keysym == XK_t))
         {
-            newTab();
+            newTab(getCurrTab().cwd);
             redraw();
             return;
         }
@@ -72,12 +71,12 @@ void handleEvent(XEvent &ev)
             }
             else
             {
-                string p = ts.pending.empty() ? ts.prompt : "> ";
+                string p = ts.more ? "> " : ts.prompt;
                 ts.lines.push_back(p + ts.input + "^C");
                 ts.input.clear();
                 ts.cursor = 0;
-                ts.pending.clear(); // cancels a half-typed multiline command
-                ts.lastStatus = 130;
+                ts.more = false;
+                sendToEngine(ts, "K"); // engine drops its half-typed multiline command, $? = 130
             }
             ts.scroll = 0;
             redraw();
@@ -90,29 +89,9 @@ void handleEvent(XEvent &ev)
             TerminalState &ts = getCurrTab();
             if (ts.busy && ts.pgid > 0)
             {
-                kill(-ts.pgid, SIGTSTP); // whole pipeline stops
-
-                if (ts.jobs.empty() && ts.fgJobId == 0)
-                    ts.nextJobId = 1;
-                Job job;
-                job.id = ts.fgJobId > 0 ? ts.fgJobId : ts.nextJobId++; // keep [n] if it came from fg
-                ts.fgJobId = 0;
-                job.pgid = ts.pgid;
-                job.pids = ts.childPids;
-                job.outFd = ts.outFd;
-                job.cmd = ts.cmdText;
-                job.stopped = true;
-                ts.jobs.push_back(job);
-
+                kill(-ts.pgid, SIGTSTP); // whole pipeline stops; the engine turns it into a job
                 ts.partial += "^Z";
-                ts.appendOutput("\n[" + to_string(job.id) + "]+  Stopped                 " + job.cmd + "\n");
-
-                // the tab no longer runs it in the foreground: give the prompt back
-                ts.outFd = -1;
-                ts.childPids.clear();
-                ts.pgid = -1;
-                ts.busy = false;
-                ts.lastStatus = 148; // 128 + SIGTSTP (20), like bash
+                ts.appendOutput("\n");
             }
             ts.scroll = 0;
             redraw();
@@ -126,11 +105,9 @@ void handleEvent(XEvent &ev)
         {
             if (termState.busy)
                 break;
-            bool cont = !termState.pending.empty();
-            termState.lines.push_back((cont ? "> " : termState.prompt) + termState.input);
-            string full = cont ? termState.pending + "\n" + termState.input : termState.input;
-            termState.pending.clear(); // runCommand sets it again if still incomplete
-            runCommand(full, termState);
+            termState.lines.push_back((termState.more ? "> " : termState.prompt) + termState.input);
+            sendToEngine(termState, "L " + termState.input); // the engine runs it
+            termState.busy = true;                           // until the engine answers R or M
             termState.input.clear();
             termState.cursor = 0;
             termState.scroll = 0;
@@ -216,7 +193,7 @@ void handleEvent(XEvent &ev)
 
             if (cx >= plusBounds.first && cx <= plusBounds.second)
             {
-                newTab();
+                newTab(getCurrTab().cwd);
                 redraw();
             }
         }

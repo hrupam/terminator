@@ -3,43 +3,54 @@
 #include <vector>
 #include <sys/types.h>
 
-// A stopped or background command: a process group this tab still owns.
+// A stopped or background command: a process group this tab's engine still owns.
 struct Job
 {
     int id;                  // the [1], [2] number
     pid_t pgid;              // its process group
-    std::vector<pid_t> pids; // every process in it
-    int outFd;               // read end of its output pipe (still open)
+    std::vector<pid_t> pids; // processes in it that are not reaped yet
+    pid_t lastPid;           // last stage of the pipeline: its exit status is the job's status
+    int status;              // raw wait status of lastPid, once it has ended
     std::string cmd;         // command text, for the jobs list
     bool stopped;            // true = Stopped, false = Running in background
 };
 
-// Everything one tab needs: its screen text, input line, cwd and running command.
+// One tab. Every tab has TWO copies of this class:
+//   GUI copy    (isEngine = false): screen lines, input line, prompt, busy  -> drawn by the GUI
+//   engine copy (isEngine = true):  cwd, $?, jobs, pending                  -> runs the commands
+// Thread mode: the engine copy lives in the tab's thread.
+// Process mode: the engine copy lives in the tab's fork()ed process.
+// The two copies talk only through 3 pipes; inFd/outFd/ctlFd are THIS copy's ends.
 class TerminalState
 {
 public:
     std::vector<std::string> lines; /* finished output lines */
     std::string partial;            /* output line still being written (no \n yet) */
     std::string input;              /* the line being typed */
-    std::string pending;            // unfinished input waiting for more lines, "" if none
+    std::string pending;            // engine: unfinished multiline input waiting for more lines
     int cursor = 0;                 /* length and cursor position in input */
     int scroll = 0;                 /* how many lines scrolled back, 0 = bottom */
-    std::string prompt;             /* "user@terminator: path> " */
-    std::string cwd;                /* shell's current directory */
+    std::string prompt;             /* "user@host:path$ " */
+    std::string cwd;                /* this tab's current directory */
     int lastStatus = 0;             /* $? : exit status of the last command */
-    bool isRunning = true;          /* running state of the terminal */
-    int outFd = -1;                 // read end of the running command's pipe, -1 if none
-    std::vector<pid_t> childPids;   // every process in the running pipeline
-    pid_t pgid = -1;                // their process group (= first child's pid)
-    bool busy = false;              // a command is running: don't draw the prompt
+    bool isRunning = true;          /* false after "exit" */
+    pid_t pgid = -1;                // GUI: process group of the foreground job (for Ctrl+C / Ctrl+Z)
+    bool busy = false;              // GUI: a command is running: don't draw the prompt
+    bool more = false;              // GUI: the engine wants more input: draw "> " instead of the prompt
 
-    std::string cmdText;   // text of the foreground command (for job listings)
-    std::vector<Job> jobs; // stopped / background jobs of this tab
+    std::vector<Job> jobs; // engine: stopped / background jobs of this tab
     int nextJobId = 1;
-    int fgJobId = 0; // job number of the foreground command if it came from fg, else 0
+
+    bool isEngine = false; // which copy this is
+    int inFd = -1;         // in pipe  (typed lines):      GUI writes,  engine reads
+    int outFd = -1;        // out pipe (command output):   engine and its commands write, GUI reads
+    int ctlFd = -1;        // ctl pipe (R, M, B, C, X):    engine writes, GUI reads
+    std::string ctlBuf;    // GUI: ctl bytes read but not yet a whole message
+    pid_t enginePid = -1;  // GUI, process mode: the tab process
 
     void appendInput(const std::string &s);
-    void appendOutput(const std::string &data);
+    void appendOutput(const std::string &data); // engine copy: sends the text to the GUI
+    void sendCtl(const std::string &msg);       // engine copy: one control message
     std::string getShortCwdPath();
     void setPrompt();
 };

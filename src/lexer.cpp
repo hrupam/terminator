@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <csignal>
 
 using namespace std;
 
@@ -29,6 +30,8 @@ string captureOutput(const string &cmd, TerminalState &ts)
     pid_t pid = fork();
     if (pid == 0) // child
     {
+        for (int sig : {SIGPIPE, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU})
+            signal(sig, SIG_DFL); // ignored signals stay ignored after exec: reset them
         int dn = open("/dev/null", O_RDONLY);
         dup2(dn, STDIN_FILENO);
         close(dn);

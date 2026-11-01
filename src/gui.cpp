@@ -178,7 +178,7 @@ void redraw()
         }
         else // the prompt line
         {
-            string p = termState.pending.empty() ? termState.prompt : "> ";
+            string p = termState.more ? "> " : termState.prompt;
             string displayText = p + termState.input;
             XDrawString(disp, win, gc, 4, y, displayText.c_str(), displayText.length());
 

@@ -13,10 +13,12 @@ public:
     bool isAppendMode = false;
 };
 
-// Parses and starts a command line in this tab (returns at once; output arrives via outFd).
+// Engine: parses and runs one line. For an external command it waits until the foreground
+// job ends or is stopped (Ctrl+Z). Incomplete input is kept in termState.pending.
 void runCommand(const std::string &str, TerminalState &termState);
 
-// Called when outFd hits EOF: reaps the children and sets $?.
-void finishCommand(TerminalState &termState);
+// Engine: reaps finished background jobs and prints [n] Done.
+void reportFinishedJobs(TerminalState &ts);
 
-void finishJob(TerminalState &ts, size_t k);
+// Engine: kills and reaps every job (tab closing / exit).
+void killAllJobs(TerminalState &ts);

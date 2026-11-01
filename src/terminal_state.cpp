@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <pwd.h>
-#include <iostream>
+#include <cerrno>
 
 using namespace std;
 
@@ -13,8 +13,35 @@ void TerminalState::appendInput(const string &s)
     cursor += s.length();
 }
 
+// write() may write less than asked; keep going until everything is out.
+static void writeAll(int fd, const string &s)
+{
+    size_t done = 0;
+    while (done < s.size())
+    {
+        ssize_t n = write(fd, s.data() + done, s.size() - done);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return; // the other side is gone
+        }
+        done += n;
+    }
+}
+
+void TerminalState::sendCtl(const string &msg)
+{
+    writeAll(ctlFd, msg + "\n"); // one message per line
+}
+
 void TerminalState::appendOutput(const string &data)
 {
+    if (isEngine) // engine copy: the screen is in the GUI, so send the text through the out pipe
+    {
+        writeAll(outFd, data);
+        return;
+    }
     for (char c : data)
     {
         if (c == '\n')
