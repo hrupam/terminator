@@ -17,6 +17,7 @@ Binding bindings[ACT_COUNT] = {
     {"prev-tab", ControlMask, XK_Left},
     {"history-prev", 0, XK_Up},
     {"history-next", 0, XK_Down},
+    {"complete", 0, XK_Tab},
 };
 
 Action findAction(XKeyEvent &e)

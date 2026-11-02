@@ -20,6 +20,7 @@ enum Action
     ACT_PREV_TAB,   // Ctrl+Left
     ACT_HIST_PREV,  // UP
     ACT_HIST_NEXT,  // DOWN
+    ACT_COMPLETE,   // Tab
     ACT_COUNT
 };
 

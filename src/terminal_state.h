@@ -53,6 +53,10 @@ public:
     int histPos = -1;      // GUI: index into history while browsing with Up/Down; -1 = not browsing
     std::string histDraft; // GUI: the line being typed before Up was pressed
 
+    /* AUTO-COMPLETE */
+    std::vector<std::string> choices; // GUI: numbered completion choices waiting for a digit
+    int wordStart = 0;                // GUI: where the word being completed starts in input
+
     void appendInput(const std::string &s);
     void appendOutput(const std::string &data); // engine copy: sends the text to the GUI
     void sendCtl(const std::string &msg);       // engine copy: one control message

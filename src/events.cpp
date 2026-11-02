@@ -6,8 +6,74 @@
 #include <unistd.h>
 #include <csignal>
 #include "keys.h"
+#include "autocomplete.h"
+#include <dirent.h>
+#include <filesystem>
 
 using namespace std;
+
+// Replaces the word being completed (from wordStart to the cursor) with text.
+static void replaceWord(TerminalState &ts, const string &text)
+{
+    ts.input.replace(ts.wordStart, ts.cursor - ts.wordStart, text);
+    ts.cursor = ts.wordStart + text.size();
+}
+
+// Tab: complete the word before the cursor with file names from the tab's directory.
+static void completeWord(TerminalState &ts)
+{
+    // the word before the cursor
+    int start = ts.cursor;
+    while (start > 0 && ts.input[start - 1] != ' ')
+        start--;
+    string word = ts.input.substr(start, ts.cursor - start);
+
+    // "src/ma": look in <cwd>/src for names starting with "ma"
+    size_t slash = word.rfind('/');
+    string dirPart = (slash == string::npos) ? "" : word.substr(0, slash + 1);
+    string prefix = (slash == string::npos) ? word : word.substr(slash + 1);
+    string dir = dirPart.empty() ? ts.cwd
+                                 : (dirPart[0] == '/' ? dirPart : ts.cwd + "/" + dirPart);
+
+    // put every name in that directory into a trie
+    Trie trie;
+    DIR *d = opendir(dir.c_str());
+    if (!d)
+        return;
+    while (dirent *e = readdir(d))
+    {
+        string name = e->d_name;
+        if (name == "." || name == "..")
+            continue;
+        if (name[0] == '.' && (prefix.empty() || prefix[0] != '.'))
+            continue; // hidden files only when the user typed a '.'
+        error_code ec;
+        if (filesystem::is_directory(dir + "/" + name, ec))
+            name += '/'; // directories complete with a trailing /
+        trie.insert(name);
+    }
+    closedir(d);
+
+    vector<string> matches = trie.getWords(prefix);
+    if (matches.empty())
+        return; // no match: do nothing
+
+    ts.wordStart = start + dirPart.size(); // only the part after the last '/' is replaced
+    if (matches.size() == 1)               // one match: complete it
+    {
+        replaceWord(ts, matches[0]);
+        return;
+    }
+
+    // several: extend to the longest common prefix, then show a numbered list to pick from
+    replaceWord(ts, trie.autocomplete(prefix));
+    ts.lines.push_back(ts.prompt + ts.input); // keep the typed line visible, like the spec's example
+    string list;
+    for (size_t i = 0; i < matches.size(); i++)
+        list += to_string(i + 1) + ". " + matches[i] + "  ";
+    ts.lines.push_back(list);
+    ts.choices = matches; // the next digit key picks one
+}
 
 static void handleAction(Action action)
 {
@@ -146,6 +212,14 @@ static void handleAction(Action action)
         break;
     }
 
+    case ACT_COMPLETE: // Tab
+    {
+        TerminalState &ts = getCurrTab();
+        if (!ts.busy)
+            completeWord(ts);
+        break;
+    }
+
     default:
         break;
     }
@@ -166,6 +240,21 @@ void handleEvent(XEvent &ev)
         char buf[128] = {0};
         KeySym keysym;
         int len = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
+
+        // a numbered completion list is showing: a digit picks, any other key cancels it
+        TerminalState &cur = getCurrTab();
+        if (!cur.choices.empty())
+        {
+            int k = (len == 1 && buf[0] >= '1' && buf[0] <= '9') ? buf[0] - '0' : 0;
+            if (k >= 1 && k <= (int)cur.choices.size())
+            {
+                replaceWord(cur, cur.choices[k - 1]);
+                cur.choices.clear();
+                redraw();
+                return;
+            }
+            cur.choices.clear(); // not a valid pick: drop the list, handle the key normally
+        }
 
         Action act = findAction(ev.xkey);
         if (act != ACT_NONE)
