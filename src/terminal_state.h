@@ -42,6 +42,7 @@ public:
     int nextJobId = 1;
 
     bool isEngine = false; // which copy this is
+    bool newGroups = true; // engine: put each command in its own process group (false inside multiWatch)
     int inFd = -1;         // in pipe  (typed lines):      GUI writes,  engine reads
     int outFd = -1;        // out pipe (command output):   engine and its commands write, GUI reads
     int ctlFd = -1;        // ctl pipe (R, M, B, C, X):    engine writes, GUI reads

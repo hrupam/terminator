@@ -1,5 +1,6 @@
 #include "executor.h"
 #include "lexer.h"
+#include "multiwatch.h"
 #include "string_helper.h"
 #include <cstring>
 #include <cstdlib>
@@ -148,6 +149,13 @@ static void waitForeground(TerminalState &termState, Job job)
 
 void runCommand(const string &str, TerminalState &termState)
 {
+    // multiWatch ["cmd1", "cmd2"] is parsed by hand: the lexer would strip the quotes and brackets
+    if (isMultiWatch(str))
+    {
+        runMultiWatch(str, termState);
+        return;
+    }
+
     vector<Token> toks;
     if (!tokenize(str, termState, toks))
     {
@@ -355,7 +363,8 @@ void runCommand(const string &str, TerminalState &termState)
             break;
         if (pid == 0)
         {
-            setpgid(0, pgid);
+            if (termState.newGroups)
+                setpgid(0, pgid);
             // ignored signals stay ignored after exec: reset them, like bash does
             for (int sig : {SIGPIPE, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU})
                 signal(sig, SIG_DFL);
@@ -415,7 +424,8 @@ void runCommand(const string &str, TerminalState &termState)
         {
             if (pgid == 0)
                 pgid = pid;
-            setpgid(pid, pgid);
+            if (termState.newGroups)
+                setpgid(pid, pgid);
             pids.push_back(pid);
         }
     }
