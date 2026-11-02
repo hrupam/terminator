@@ -1,5 +1,6 @@
 #include "executor.h"
 #include "lexer.h"
+#include "multiwatch.h"
 #include "string_helper.h"
 #include <cstring>
 #include <cstdlib>
@@ -99,8 +100,62 @@ static int findJob(TerminalState &ts, vector<string> &words)
     return -1;
 }
 
+// raw wait status -> $? value
+static int decodeStatus(int st)
+{
+    if (WIFEXITED(st))
+        return WEXITSTATUS(st);
+    if (WIFSIGNALED(st))
+        return 128 + WTERMSIG(st);
+    return 0;
+}
+
+// Engine: wait until the foreground job ends or is stopped (Ctrl+Z).
+// WUNTRACED = waitpid also returns when a process is STOPPED, not only when it ends.
+// We wait for our own pids only: waitpid(-1) would steal other tabs' children in thread mode.
+static void waitForeground(TerminalState &termState, Job job)
+{
+    vector<pid_t> stopped;
+    for (pid_t p : job.pids)
+    {
+        int st;
+        if (waitpid(p, &st, WUNTRACED) < 0)
+            continue;
+        if (WIFSTOPPED(st))
+            stopped.push_back(p); // frozen, still alive
+        else if (p == job.lastPid)
+            job.status = st;
+    }
+
+    if (stopped.empty()) // finished, or killed by Ctrl+C
+    {
+        termState.lastStatus = decodeStatus(job.status);
+        return;
+    }
+
+    // stopped by Ctrl+Z: it becomes a job (a job resumed with fg keeps its number)
+    job.pids = stopped;
+    job.stopped = true;
+    if (job.id == 0)
+    {
+        if (termState.jobs.empty())
+            termState.nextJobId = 1; // like bash: numbering restarts when no jobs remain
+        job.id = termState.nextJobId++;
+    }
+    termState.jobs.push_back(job);
+    termState.appendOutput("[" + to_string(job.id) + "]+  Stopped                 " + job.cmd + "\n");
+    termState.lastStatus = 148; // 128 + SIGTSTP (20), like bash
+}
+
 void runCommand(const string &str, TerminalState &termState)
 {
+    // multiWatch ["cmd1", "cmd2"] is parsed by hand: the lexer would strip the quotes and brackets
+    if (isMultiWatch(str))
+    {
+        runMultiWatch(str, termState);
+        return;
+    }
+
     vector<Token> toks;
     if (!tokenize(str, termState, toks))
     {
@@ -177,8 +232,7 @@ void runCommand(const string &str, TerminalState &termState)
 
         if (stages[0].words[0] == "clear")
         {
-            termState.lines.clear();
-            termState.partial.clear();
+            termState.sendCtl("C"); // the screen lives in the GUI copy
             termState.lastStatus = 0;
             return;
         }
@@ -220,14 +274,11 @@ void runCommand(const string &str, TerminalState &termState)
             Job job = termState.jobs[k];
             termState.jobs.erase(termState.jobs.begin() + k);
 
-            termState.appendOutput(job.cmd + "\n"); // bash prints the command it resumes
-            termState.outFd = job.outFd;
-            termState.childPids = job.pids;
-            termState.pgid = job.pgid;
-            termState.cmdText = job.cmd;
-            termState.fgJobId = job.id;
-            termState.busy = true;
+            termState.appendOutput(job.cmd + "\n");          // bash prints the command it resumes
+            termState.sendCtl("B " + to_string(job.pgid)); // GUI: Ctrl+C / Ctrl+Z now go to this group
+            job.stopped = false;
             kill(-job.pgid, SIGCONT); // wake the whole group
+            waitForeground(termState, job);
             return;
         }
 
@@ -283,13 +334,7 @@ void runCommand(const string &str, TerminalState &termState)
 
     string badDir = "terminator: cannot enter " + termState.cwd + "\n";
 
-    // Pipes
-    int outPipe[2]; // final pipe
-    if (pipe2(outPipe, O_CLOEXEC) < 0)
-    {
-        termState.lastStatus = 1;
-        return;
-    }
+    // Pipes between stages (the last stage writes straight into the tab's out pipe)
     vector<vector<int>> pipes(n - 1, vector<int>(2));
     for (int i = 0; i < n - 1; i++)
     {
@@ -303,8 +348,6 @@ void runCommand(const string &str, TerminalState &termState)
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
-            close(outPipe[0]);
-            close(outPipe[1]);
             termState.lastStatus = 1;
             return;
         }
@@ -320,7 +363,11 @@ void runCommand(const string &str, TerminalState &termState)
             break;
         if (pid == 0)
         {
-            setpgid(0, pgid);
+            if (termState.newGroups)
+                setpgid(0, pgid);
+            // ignored signals stay ignored after exec: reset them, like bash does
+            for (int sig : {SIGPIPE, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU})
+                signal(sig, SIG_DFL);
 
             if (i == 0)
             {
@@ -332,10 +379,10 @@ void runCommand(const string &str, TerminalState &termState)
                 dup2(pipes[i - 1][0], STDIN_FILENO);
 
             if (i == n - 1)
-                dup2(outPipe[1], STDOUT_FILENO);
+                dup2(termState.outFd, STDOUT_FILENO);
             else
                 dup2(pipes[i][1], STDOUT_FILENO);
-            dup2(outPipe[1], STDERR_FILENO);
+            dup2(termState.outFd, STDERR_FILENO);
 
             // redirection
             if (!inPaths[i].empty())
@@ -377,13 +424,13 @@ void runCommand(const string &str, TerminalState &termState)
         {
             if (pgid == 0)
                 pgid = pid;
-            setpgid(pid, pgid);
+            if (termState.newGroups)
+                setpgid(pid, pgid);
             pids.push_back(pid);
         }
     }
 
     // parent cleanup
-    close(outPipe[1]);
     for (auto &p : pipes)
     {
         close(p[0]);
@@ -391,65 +438,65 @@ void runCommand(const string &str, TerminalState &termState)
     }
     if (pids.empty()) // the very first fork failed
     {
-        close(outPipe[0]);
         termState.appendOutput("terminator: fork failed\n");
         termState.lastStatus = 1;
         return;
     }
-    termState.outFd = outPipe[0];
-    termState.pgid = pgid;
-    termState.childPids = pids;
-    termState.busy = true;
-    termState.cmdText = str;
-    termState.fgJobId = 0;
+    Job fg;
+    fg.id = 0;
+    fg.pgid = pgid;
+    fg.pids = pids;
+    fg.lastPid = pids.back();
+    fg.status = 0;
+    fg.cmd = str;
+    fg.stopped = false;
+    termState.sendCtl("B " + to_string(pgid)); // GUI: send Ctrl+C / Ctrl+Z to this group
+    waitForeground(termState, fg);             // the engine waits; the GUI keeps running
 }
 
-void finishCommand(TerminalState &termState)
+// Engine: reap background/stopped jobs that have ended, print [n] Done / Exit / Terminated.
+void reportFinishedJobs(TerminalState &ts)
 {
-    close(termState.outFd); // close read end
-    for (size_t i = 0; i < termState.childPids.size(); i++)
+    for (size_t k = 0; k < ts.jobs.size();)
     {
-        int status;
-        waitpid(termState.childPids[i], &status, 0);
-        if (i == termState.childPids.size() - 1)
+        Job &j = ts.jobs[k];
+        for (size_t i = 0; i < j.pids.size();)
         {
-            if (WIFEXITED(status))
-                termState.lastStatus = WEXITSTATUS(status);
-            else if (WIFSIGNALED(status))
-                termState.lastStatus = 128 + WTERMSIG(status);
+            int st;
+            pid_t r = waitpid(j.pids[i], &st, WNOHANG); // 0 = still running or stopped
+            if (r == j.pids[i])
+            {
+                if (r == j.lastPid)
+                    j.status = st;
+                j.pids.erase(j.pids.begin() + i);
+            }
+            else
+                i++;
         }
+        if (!j.pids.empty())
+        {
+            k++;
+            continue;
+        }
+        string state;
+        if (WIFEXITED(j.status))
+            state = WEXITSTATUS(j.status) == 0 ? "Done" : "Exit " + to_string(WEXITSTATUS(j.status));
+        else
+            state = "Terminated";
+        ts.appendOutput("[" + to_string(j.id) + "]   " + state + "                    " + j.cmd + "\n");
+        ts.jobs.erase(ts.jobs.begin() + k);
     }
-
-    if (!termState.partial.empty()) // output without a final \n
-    {
-        termState.lines.push_back(termState.partial);
-        termState.partial.clear();
-    }
-    termState.outFd = -1;
-    termState.childPids.clear();
-    termState.pgid = -1;
-    termState.busy = false;
-    termState.fgJobId = 0;
 }
 
-// A background/stopped job's pipe hit EOF: reap it, print Done/Exit, drop it.
-void finishJob(TerminalState &ts, size_t k)
+// Engine: tab closing or exit: kill and reap every job.
+void killAllJobs(TerminalState &ts)
 {
-    Job job = ts.jobs[k];
-    ts.jobs.erase(ts.jobs.begin() + k);
-
-    close(job.outFd);
-    int status = 0;
-    for (pid_t p : job.pids)
-        waitpid(p, &status, 0); // status ends up as the last stage's
-
-    string state;
-    if (WIFEXITED(status))
-        state = WEXITSTATUS(status) == 0 ? "Done" : "Exit " + to_string(WEXITSTATUS(status));
-    else
-        state = "Terminated";
-
-    if (!ts.partial.empty())
-        ts.appendOutput("\n"); // don't glue onto a half-printed line
-    ts.appendOutput("[" + to_string(job.id) + "]   " + state + "                    " + job.cmd + "\n");
+    for (Job &j : ts.jobs)
+    {
+        kill(-j.pgid, SIGHUP);
+        kill(-j.pgid, SIGCONT); // a stopped process only reacts to SIGHUP once continued
+        for (pid_t p : j.pids)
+            waitpid(p, nullptr, 0);
+    }
+    ts.jobs.clear();
 }

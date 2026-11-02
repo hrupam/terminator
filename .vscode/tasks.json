@@ -5,9 +5,33 @@
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": ["$gcc"] },
     { "label": "clean", "type": "shell", "command": "make clean" },
-    { "label": "strace", "type": "shell", "dependsOn": "make",
-      "command": "strace -f -o /tmp/strace.txt -e trace=process,pipe2,dup2,close,kill ./terminator" },
-    { "label": "valgrind fds", "type": "shell", "dependsOn": "make",
-      "command": "valgrind --track-fds=yes --leak-check=full --log-file=/tmp/vg.txt ./terminator" }
+
+    { "label": "run (thread mode)", "type": "shell", "dependsOn": "make",
+      "command": "./terminator" },
+    { "label": "run (process mode)", "type": "shell", "dependsOn": "make",
+      "command": "./terminator useProcess=True" },
+
+    // look at the running program from outside
+    { "label": "show threads (thread mode)", "type": "shell",
+      "command": "ps -T -o pid,spid,comm -p $(pgrep -n terminator)" },
+    { "label": "show process tree", "type": "shell",
+      "command": "pstree -p $(pgrep -o terminator)" },
+    { "label": "show pipes of the GUI", "type": "shell",
+      "command": "ls -l /proc/$(pgrep -o terminator)/fd | grep -E 'pipe|socket'" },
+
+    // syscall traces: clone = new thread or process, then fork/exec/wait, pipes and signals
+    { "label": "strace (thread mode)", "type": "shell", "dependsOn": "make",
+      "command": "strace -f -o /tmp/strace-thread.txt -e trace=process,pipe2,dup2,close,setpgid ./terminator" },
+    { "label": "strace (process mode)", "type": "shell", "dependsOn": "make",
+      "command": "strace -f -o /tmp/strace-process.txt -e trace=process,pipe2,dup2,close,setpgid ./terminator useProcess=True" },
+
+    { "label": "valgrind fds (thread mode)", "type": "shell", "dependsOn": "make",
+      "command": "valgrind --track-fds=yes --leak-check=full --log-file=/tmp/vg-thread.txt ./terminator" },
+    { "label": "valgrind fds (process mode)", "type": "shell", "dependsOn": "make",
+      "command": "valgrind --track-fds=yes --leak-check=full --trace-children=yes --log-file=/tmp/vg-process.%p.txt ./terminator useProcess=True" },
+
+    // Ubuntu blocks attaching gdb to a process it didn't start; this allows it until reboot
+    { "label": "allow attach (ptrace_scope=0)", "type": "shell",
+      "command": "echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope" }
   ]
 }

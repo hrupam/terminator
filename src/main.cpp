@@ -3,6 +3,8 @@
 #include "events.h"
 #include "executor.h"
 #include <climits>
+#include <csignal>
+#include <strings.h>
 #include <cerrno>
 #include <vector>
 #include <unistd.h>
@@ -11,21 +13,28 @@
 
 using namespace std;
 
-int main(void)
+int main(int argc, char **argv)
 {
+    // ./terminator                  -> thread mode  (one engine thread per tab)
+    // ./terminator useProcess=True  -> process mode (one engine process per tab)
+    if (argc > 1 && strcasecmp(argv[1], "useProcess=True") == 0)
+        useProcess = true;
+
+    // a write to a pipe whose reader died raises SIGPIPE, which would kill the GUI; children reset it
+    signal(SIGPIPE, SIG_IGN);
+
     if (!initGui())
         return 1;
-
-    tabs.emplace_back();
-
-    // getting initial working directory
-    char cwdbuf[PATH_MAX];
-    if (getcwd(cwdbuf, sizeof(cwdbuf)))
-        getCurrTab().cwd = cwdbuf;
-    getCurrTab().setPrompt();
+    XStoreName(disp, win, useProcess ? "Terminator (process mode)" : "Terminator (thread mode)");
 
     int xfd = ConnectionNumber(disp);
     fcntl(xfd, F_SETFD, FD_CLOEXEC);
+
+    // getting initial working directory
+    char cwdbuf[PATH_MAX];
+    newTab(getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : "/");
+    if (tabs.empty())
+        return 1;
 
     while (appRunning)
     {
@@ -47,16 +56,12 @@ int main(void)
         vector<int> fdTab; // which tab each fd belongs to
         for (size_t i = 0; i < tabs.size(); i++)
         {
-            if (tabs[i].outFd != -1)
-            {
-                fds.push_back({tabs[i].outFd, POLLIN, 0});
-                fdTab.push_back(i);
-            }
-            for (Job &j : tabs[i].jobs) // background (and stopped) jobs
-            {
-                fds.push_back({j.outFd, POLLIN, 0});
-                fdTab.push_back(i);
-            }
+            if (!tabs[i].isRunning)
+                continue;
+            fds.push_back({tabs[i].outFd, POLLIN, 0}); // output of the tab's engine and commands
+            fdTab.push_back(i);
+            fds.push_back({tabs[i].ctlFd, POLLIN, 0}); // control messages of the tab's engine
+            fdTab.push_back(i);
         }
 
         poll(fds.data(), fds.size(), -1);
@@ -67,39 +72,18 @@ int main(void)
             if (!(fds[k].revents & (POLLIN | POLLHUP)))
                 continue;
             TerminalState &tab = tabs[fdTab[k - 1]];
-            int fd = fds[k].fd;
-            char buffer[4096];
-
-            if (fd == tab.outFd) // the foreground command
-            {
-                ssize_t n = read(fd, buffer, sizeof(buffer));
-                if (n > 0)
-                    tab.appendOutput(string(buffer, n));
-                else if (n == 0 || errno != EINTR)
-                    finishCommand(tab);
-            }
-            else // a job: find it by its fd
-            {
-                size_t j = 0;
-                while (j < tab.jobs.size() && tab.jobs[j].outFd != fd)
-                    j++;
-                if (j == tab.jobs.size())
-                    continue; // already gone
-                ssize_t n = read(fd, buffer, sizeof(buffer));
-                if (n > 0)
-                    tab.appendOutput(string(buffer, n));
-                else if (n == 0 || errno != EINTR)
-                    finishJob(tab, j);
-            }
+            if (fds[k].fd == tab.outFd)
+                handleEngineOutput(tab);
+            else
+                handleEngineControl(tab);
             changed = true;
         }
         if (changed)
             redraw();
     }
 
-    // Kill all tab processes before closing the terminal
-    for (TerminalState &tab : tabs)
-        killTabProcesses(tab);
+    // stop every tab's engine (and its jobs) before closing the window
+    shutdownAllTabs();
 
     closeTerminal();
 
