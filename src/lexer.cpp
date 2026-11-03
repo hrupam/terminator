@@ -8,6 +8,16 @@
 
 using namespace std;
 
+bool isShellInvocation(const string &cmd)
+{
+    static const char *shells[] = {"bash", "sh", "dash", "zsh", "ksh", "source", "."};
+    string base = cmd.substr(cmd.find_last_of('/') + 1); // "/bin/bash" -> "bash"
+    for (const char *s : shells)
+        if (base == s)
+            return true;
+    return base.size() > 3 && base.compare(base.size() - 3, 3, ".sh") == 0; // ./check.sh
+}
+
 string captureOutput(const string &cmd, TerminalState &ts)
 {
     vector<Token> toks;
@@ -17,6 +27,8 @@ string captureOutput(const string &cmd, TerminalState &ts)
     vector<string> words;
     for (Token &t : toks)
         words.push_back(t.text);
+    if (isShellInvocation(words[0]))
+        return "terminator: " + words[0] + ": shell scripts are not supported";
     vector<char *> argv;
     for (string &w : words)
         argv.push_back(w.data());
@@ -129,12 +141,14 @@ bool tokenize(const string &s, TerminalState &ts, vector<Token> &out)
     bool inWord = false;
     size_t i = 0, n = s.size();
 
+    bool quoted = false; // did the current word contain quotes or a \ escape?
     auto endWord = [&]()
     {
         if (inWord)
-            out.push_back({cur, false});
+            out.push_back({cur, false, quoted});
         cur.clear();
         inWord = false;
+        quoted = false;
     };
 
     while (i < n)
@@ -145,7 +159,7 @@ bool tokenize(const string &s, TerminalState &ts, vector<Token> &out)
             endWord();
             i++;
         }
-        else if (c == '|' || c == '<')
+        else if (c == '|' || c == '<' || c == '&') // & = run in the background
         {
             endWord();
             out.push_back({string(1, c), true});
@@ -173,6 +187,7 @@ bool tokenize(const string &s, TerminalState &ts, vector<Token> &out)
             {
                 cur += s[i + 1];
                 inWord = true;
+                quoted = true;
             }
             i += 2;
         }
@@ -183,11 +198,13 @@ bool tokenize(const string &s, TerminalState &ts, vector<Token> &out)
                 return false; // unclosed '
             cur += s.substr(i + 1, j - i - 1);
             inWord = true;
+            quoted = true;
             i = j + 1;
         }
         else if (c == '"')
         {
             inWord = true;
+            quoted = true;
             i++;
             while (true)
             {

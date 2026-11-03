@@ -2,6 +2,7 @@
 #include "gui.h"
 #include "tabs.h"
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #include <string>
 #include <unistd.h>
 #include <csignal>
@@ -220,10 +221,84 @@ static void handleAction(Action action)
         break;
     }
 
+    case ACT_COPY: // Ctrl+Shift+C: the line being typed, or else the last output line
+    {
+        TerminalState &ts = getCurrTab();
+        if (!ts.input.empty())
+            clipboardText = ts.input;
+        else if (!ts.lines.empty())
+            clipboardText = ts.lines.back();
+        else
+            break;
+        XSetSelectionOwner(disp, clipboardAtom, win, CurrentTime); // "I own the clipboard now"
+        break;
+    }
+
+    case ACT_PASTE: // Ctrl+Shift+V: ask the clipboard's owner; the text arrives as SelectionNotify
+        XConvertSelection(disp, clipboardAtom, utf8Atom, pasteProp, win, CurrentTime);
+        break;
+
     default:
         break;
     }
     redraw();
+}
+
+// Someone (another app, or Terminator itself) wants the text we copied.
+static void answerSelectionRequest(XSelectionRequestEvent &r)
+{
+    if (r.property == None) // very old clients: use the target as the property name
+        r.property = r.target;
+
+    XSelectionEvent reply = {};
+    reply.type = SelectionNotify;
+    reply.requestor = r.requestor;
+    reply.selection = r.selection;
+    reply.target = r.target;
+    reply.property = r.property;
+    reply.time = r.time;
+
+    if (r.target == targetsAtom) // "which formats do you offer?"
+    {
+        Atom offered[] = {utf8Atom, XA_STRING};
+        XChangeProperty(disp, r.requestor, r.property, XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)offered, 2);
+    }
+    else if (r.target == utf8Atom || r.target == XA_STRING) // "give me the text"
+        XChangeProperty(disp, r.requestor, r.property, r.target, 8, PropModeReplace,
+                        (const unsigned char *)clipboardText.c_str(), clipboardText.size());
+    else
+        reply.property = None; // a format we don't offer
+
+    XSendEvent(disp, r.requestor, False, 0, (XEvent *)&reply); // "done, look at your property"
+}
+
+// The clipboard's owner has put the text on our window (answer to Ctrl+Shift+V).
+static void insertPastedText(XSelectionEvent &s)
+{
+    if (s.property == None)
+        return; // clipboard empty, or no text form available
+
+    Atom type;
+    int format;
+    unsigned long count, remaining;
+    unsigned char *data = nullptr;
+    XGetWindowProperty(disp, win, pasteProp, 0, 1 << 20, True, AnyPropertyType,
+                       &type, &format, &count, &remaining, &data); // True = delete after reading
+    if (!data)
+        return;
+
+    string text;
+    for (unsigned long i = 0; i < count; i++)
+    {
+        char c = data[i];
+        if (c == '\n' || c == '\r' || c == '\t')
+            text += ' '; // the input line is one line: newlines become spaces
+        else if ((unsigned char)c >= 32)
+            text += c;
+    }
+    XFree(data);
+    getCurrTab().appendInput(text); // inserted at the cursor
 }
 
 void handleEvent(XEvent &ev)
@@ -231,6 +306,18 @@ void handleEvent(XEvent &ev)
 
     if (ev.type == Expose && ev.xexpose.count == 0)
     {
+        redraw();
+        return;
+    }
+
+    if (ev.type == SelectionRequest) // another app pastes what we copied
+    {
+        answerSelectionRequest(ev.xselectionrequest);
+        return;
+    }
+    if (ev.type == SelectionNotify) // the text we asked for (paste) has arrived
+    {
+        insertPastedText(ev.xselection);
         redraw();
         return;
     }

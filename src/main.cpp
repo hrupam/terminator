@@ -2,6 +2,7 @@
 #include "tabs.h"
 #include "events.h"
 #include "executor.h"
+#include "keys.h"
 #include <climits>
 #include <csignal>
 #include <strings.h>
@@ -35,6 +36,10 @@ int main(int argc, char **argv)
     newTab(getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : "/");
     if (tabs.empty())
         return 1;
+
+    // custom key bindings; problems are shown in the first tab, those actions keep their defaults
+    for (const string &err : loadKeyConfig())
+        getCurrTab().appendOutput("terminator: " + err + "\n");
 
     while (appRunning)
     {
