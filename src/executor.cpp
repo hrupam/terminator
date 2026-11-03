@@ -324,7 +324,7 @@ void runCommand(const string &str, TerminalState &termState)
             Job job = termState.jobs[k];
             termState.jobs.erase(termState.jobs.begin() + k);
 
-            termState.appendOutput(job.cmd + "\n");          // bash prints the command it resumes
+            termState.appendOutput(job.cmd + "\n");        // bash prints the command it resumes
             termState.sendCtl("B " + to_string(job.pgid)); // GUI: Ctrl+C / Ctrl+Z now go to this group
             job.stopped = false;
             kill(-job.pgid, SIGCONT); // wake the whole group

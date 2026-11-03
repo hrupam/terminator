@@ -100,7 +100,7 @@ static void handleAction(Action action)
 
     case ACT_INTERRUPT: // Ctrl+C
     {
-        TerminalState &ts = getCurrTab();
+        TerminalState &ts = getCurrTab(); // GUI's Terminal State
         if (ts.busy)
         {
             if (ts.pgid > 0)
