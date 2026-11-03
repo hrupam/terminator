@@ -200,7 +200,7 @@ Before each prompt, `reportFinishedJobs()` calls `waitpid(-pgid, WNOHANG)` for e
 
 `multiWatch ["cmd1", "cmd2", ...]` is parsed by `parseCommandList()`. The engine forks one **watcher** process in its own process group and waits for it as a normal foreground job, so Ctrl+C reaches the watcher and all the commands it runs.
 
-The watcher runs each command through the same `runCommand()` with `newGroups = false`, so the commands stay in the watcher's group. Each run gets its own pipe for stdout and stderr. The watcher `poll()`s all the read ends, with a timeout, and collects each command's output until EOF. When a run finishes, the watcher prints its block and starts the same command again two seconds later:
+For each command the watcher forks a **runner** process, which calls the same `runCommand()` with `newGroups = false`, so the command and its pipeline stay in the watcher's group, and pipes, redirection and `$(...)` work inside multiWatch. Each run gets its own pipe for stdout and stderr. The watcher `poll()`s all the read ends, with a timeout set to when the next stopped command is due. Each piece of output read from a pipe is printed as one block. When a pipe reaches EOF, that run has finished: the watcher closes the pipe, reaps the runner with `waitpid()`, and starts the same command again two seconds later:
 
 ```
 "date +%T", 1730637562:
@@ -209,7 +209,7 @@ The watcher runs each command through the same `runCommand()` with `newGroups = 
 ----------------------------------------------------
 ```
 
-The timestamp is the Unix time at which that run's output was printed. Commands run in parallel and never wait for each other. Ctrl+C kills the whole group; the engine reports status 130 and no process is left behind.
+The timestamp is the Unix time at which that output was printed. Output that arrives in several reads (more than 4 KB, or written in pieces) is printed as several blocks. Commands run in parallel and never wait for each other. Ctrl+Z is answered with `SIGCONT`, so multiWatch cannot be suspended. Ctrl+C kills the whole group; the engine reports status 130 and no process is left behind.
 
 ## 11. No shell is ever started
 
@@ -243,7 +243,7 @@ Behaviour:
 - Several matches: extend the word to their longest common prefix, then list the matches numbered `1.` to `9.` in the output. The next keystroke, if it is a digit, picks that match; any other key dismisses the list.
 - No match: nothing changes.
 
-The trie is rebuilt on every Tab press. A directory listing is small, rebuilding costs microseconds, and the result is never stale. `make test` runs 22 unit tests on the trie (tests/trie_test.cpp), which needs no X11.
+The trie is rebuilt on every Tab press. A directory listing is small, rebuilding costs microseconds, and the result is never stale.
 
 ## 14. Hotkeys and configuration
 
@@ -275,6 +275,5 @@ This is the standard X11 protocol, so copying to and from other applications wor
 
 ## 17. Testing
 
-- `make test` runs the trie unit tests.
-- Both modes were tested by driving the window with synthetic X key events. The tests covered pipes, redirection, globbing, `$()`, multiline input, `$?`, Ctrl+C (status 130, no leftover processes), Ctrl+Z, `jobs`/`fg`/`bg`, `&`, multiWatch, completion, history, copy/paste, the key-configuration file, closing busy tabs, the refusal of shell scripts, and a tab process killed with `SIGSEGV` (in process mode the GUI and other tabs keep running).
+- Both modes were tested by hand and by driving the window with synthetic X key events. The tests covered pipes, redirection, globbing, `$()`, multiline input, `$?`, Ctrl+C (status 130, no leftover processes), Ctrl+Z, `jobs`/`fg`/`bg`, `&`, multiWatch, completion, history, copy/paste, the key-configuration file, closing busy tabs, the refusal of shell scripts, and a tab process killed with `SIGSEGV` (in process mode the GUI and other tabs keep running).
 - `valgrind --track-fds=yes` in thread mode reported no memory errors and no leaked fds.

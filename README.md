@@ -21,7 +21,6 @@ No other libraries are used. Terminator does not use a pseudo-terminal (no `fork
 make                          # builds ./terminator
 ./terminator                  # thread mode: one engine thread per tab (default)
 ./terminator useProcess=True  # process mode: one engine process per tab
-make test                     # unit tests for the completion trie (no X11 needed)
 make clean
 ```
 
@@ -72,11 +71,16 @@ Copy takes the line being typed; if it is empty, it takes the last output line.
 Every key in the table can be rebound in `~/.terminatorrc`, one `action = key` per line. The file is read at start-up, so a change needs no recompiling and survives a restart.
 An unknown action, an invalid key, a printable key without Ctrl or Alt, or a key already used by another action is reported in the first tab, and that action keeps its default.
 
+Example `~/.terminatorrc`:
+
 ```
-cp terminatorrc.example ~/.terminatorrc
+# action = key        (lines starting with # are ignored)
+clear-screen = Ctrl+Shift+L
+new-tab      = Ctrl+Shift+N
 ```
 
-`terminatorrc.example` lists every action name with its default key.
+Action names: `beginning-of-line`, `end-of-line`, `kill-to-start`, `kill-to-end`, `delete-word`, `clear-screen`, `close-tab`, `interrupt`, `suspend`, `new-tab`, `next-tab`, `prev-tab`, `history-prev`, `history-next`, `complete`, `copy`, `paste`.
+A key is optional `Ctrl+`, `Shift+` and `Alt+` modifiers followed by an X key name such as `L`, `Up`, `Right`, `Tab` or `F5`.
 
 ## Try it
 
@@ -113,8 +117,6 @@ src/
   lexer.cpp           tokenizer: quotes, escapes, $VAR, $?, $(...)
   multiwatch.cpp      multiWatch
   autocomplete.*      trie used by Tab completion
-tests/trie_test.cpp   unit tests for the trie (make test)
-terminatorrc.example  sample key configuration
 DESIGN.md             design document
 .vscode/              build tasks and gdb launch configurations for both modes
 ```
@@ -135,5 +137,5 @@ DESIGN.md             design document
 
 ## Debugging
 
-`.vscode/launch.json` has gdb configurations for thread mode, process mode (GUI), process mode (tab 1's engine, using `.vscode/follow-tab.gdb`) and attaching to a running tab process.
+`.vscode/launch.json` has gdb configurations for thread mode, process mode (GUI), process mode (tab 1's engine, using `.vscode/follow-tab.gdb`), the child of the first `fork()` (to step through the code under `pid == 0`: run it in thread mode and type a command), and attaching to a running tab process.
 `.vscode/tasks.json` runs both modes, `strace` and `valgrind --track-fds=yes` for each mode, and shows the threads, the process tree and the GUI's pipes.
