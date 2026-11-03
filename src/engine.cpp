@@ -25,7 +25,7 @@ void engineMain(TerminalState termState)
         {
             string line = msg.substr(2);
             string full = termState.pending.empty() ? line : termState.pending + "\n" + line;
-            termState.pending.clear(); // runCommand sets it again if still incomplete
+            termState.pending.clear();   // runCommand sets it again if still incomplete
             runCommand(full, termState); // returns when the command has finished or stopped
         }
         else if (msg == "K") // Ctrl+C at the prompt: drop the half-typed command

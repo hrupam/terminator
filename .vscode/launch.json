@@ -4,64 +4,153 @@
     {
       // GUI thread + every tab's engine thread, all in one process
       "name": "Terminator (thread mode)",
-      "type": "cppdbg", "request": "launch",
+      "type": "cppdbg",
+      "request": "launch",
       "program": "${workspaceFolder}/terminator",
       "args": [],
       "cwd": "${workspaceFolder}",
-      "environment": [{ "name": "DISPLAY", "value": "${env:DISPLAY}" }],
+      "environment": [
+        {
+          "name": "DISPLAY",
+          "value": "${env:DISPLAY}"
+        }
+      ],
       "MIMode": "gdb",
       "preLaunchTask": "make",
       "setupCommands": [
-        { "text": "-enable-pretty-printing", "ignoreFailures": true },
-        { "text": "handle SIGPIPE nostop noprint pass" },
-        { "text": "set print thread-events off" },   // no "[New Thread ...]" spam
-        { "text": "set follow-fork-mode parent" },   // stay in Terminator when a command is forked
-        { "text": "set detach-on-fork on" }          // let ls, sleep... run on their own
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "text": "handle SIGPIPE nostop noprint pass"
+        },
+        {
+          "text": "set print thread-events off"
+        }, // no "[New Thread ...]" spam
+        {
+          "text": "set follow-fork-mode parent"
+        }, // stay in Terminator when a command is forked
+        {
+          "text": "set detach-on-fork on"
+        } // let ls, sleep... run on their own
       ]
     },
     {
       // debugs the GUI process; the tab processes run freely
       "name": "Terminator (process mode: GUI)",
-      "type": "cppdbg", "request": "launch",
+      "type": "cppdbg",
+      "request": "launch",
       "program": "${workspaceFolder}/terminator",
-      "args": ["useProcess=True"],
+      "args": [
+        "useProcess=True"
+      ],
       "cwd": "${workspaceFolder}",
-      "environment": [{ "name": "DISPLAY", "value": "${env:DISPLAY}" }],
+      "environment": [
+        {
+          "name": "DISPLAY",
+          "value": "${env:DISPLAY}"
+        }
+      ],
       "MIMode": "gdb",
       "preLaunchTask": "make",
       "setupCommands": [
-        { "text": "-enable-pretty-printing", "ignoreFailures": true },
-        { "text": "handle SIGPIPE nostop noprint pass" },
-        { "text": "set follow-fork-mode parent" },
-        { "text": "set detach-on-fork on" }
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "text": "handle SIGPIPE nostop noprint pass"
+        },
+        {
+          "text": "set follow-fork-mode parent"
+        },
+        {
+          "text": "set detach-on-fork on"
+        }
       ]
     },
     {
       // debugs TAB 1's engine process; the GUI runs freely
       "name": "Terminator (process mode: tab 1 engine)",
-      "type": "cppdbg", "request": "launch",
+      "type": "cppdbg",
+      "request": "launch",
       "program": "${workspaceFolder}/terminator",
-      "args": ["useProcess=True"],
+      "args": [
+        "useProcess=True"
+      ],
       "cwd": "${workspaceFolder}",
-      "environment": [{ "name": "DISPLAY", "value": "${env:DISPLAY}" }],
+      "environment": [
+        {
+          "name": "DISPLAY",
+          "value": "${env:DISPLAY}"
+        }
+      ],
       "MIMode": "gdb",
       "preLaunchTask": "make",
       "setupCommands": [
-        { "text": "-enable-pretty-printing", "ignoreFailures": true },
-        { "text": "handle SIGPIPE nostop noprint pass" },
-        { "text": "source ${workspaceFolder}/.vscode/follow-tab.gdb" }
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "text": "handle SIGPIPE nostop noprint pass"
+        },
+        {
+          "text": "source ${workspaceFolder}/.vscode/follow-tab.gdb"
+        }
       ]
     },
     {
       // any tab process that is already running (needs the "allow attach" task once)
       "name": "Attach to a tab process",
-      "type": "cppdbg", "request": "attach",
+      "type": "cppdbg",
+      "request": "attach",
       "program": "${workspaceFolder}/terminator",
       "processId": "${command:pickProcess}",
       "MIMode": "gdb",
       "setupCommands": [
-        { "text": "set follow-fork-mode parent" },
-        { "text": "set detach-on-fork on" }
+        {
+          "text": "set follow-fork-mode parent"
+        },
+        {
+          "text": "set detach-on-fork on"
+        }
+      ]
+    },
+    {
+      // debug the CHILD of the first fork (the code under pid == 0)
+      "name": "Terminator (follow forked child)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/terminator",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "DISPLAY",
+          "value": "${env:DISPLAY}"
+        }
+      ],
+      "MIMode": "gdb",
+      "preLaunchTask": "make",
+      "setupCommands": [
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "text": "handle SIGPIPE nostop noprint pass"
+        },
+        {
+          "text": "set print thread-events off"
+        },
+        {
+          "text": "set follow-fork-mode child"
+        }, // after fork(), debug the child
+        {
+          "text": "set detach-on-fork on"
+        } // let the parent (the GUI) run freely
       ]
     }
   ]
