@@ -12,6 +12,8 @@ XFontStruct *font;
 unsigned int width = 1200, height = 800;
 unsigned long bgColor, fgColor, accentColor, dimColor; // pixel values from namedColor()
 Atom wmDeleteMessage;
+Atom clipboardAtom, utf8Atom, targetsAtom, pasteProp;
+string clipboardText;
 
 vector<pair<int, int>> tabBounds;
 pair<int, int> plusBounds;
@@ -55,6 +57,12 @@ bool initGui()
 
     wmDeleteMessage = XInternAtom(disp, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(disp, win, &wmDeleteMessage, 1);
+
+    // an atom is X's numeric id for a name; look these up once
+    clipboardAtom = XInternAtom(disp, "CLIPBOARD", False);    // the Ctrl+C / Ctrl+V clipboard
+    utf8Atom = XInternAtom(disp, "UTF8_STRING", False);       // "text, UTF-8"
+    targetsAtom = XInternAtom(disp, "TARGETS", False);        // "which formats can you give?"
+    pasteProp = XInternAtom(disp, "TERMINATOR_PASTE", False); // where pasted text is delivered
 
     const char *fontNames[] = {"12x24", "10x20", "9x15", "fixed"};
     font = nullptr;

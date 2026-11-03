@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <csignal>
 #include <algorithm>
+#include <glob.h>
 
 using namespace std;
 
@@ -100,6 +101,26 @@ static int findJob(TerminalState &ts, vector<string> &words)
     return -1;
 }
 
+// "*.txt" -> the matching names in the tab's directory, sorted, like bash.
+// No match: the word stays as typed (bash does the same).
+static vector<string> expandWildcards(const string &word, const string &cwd)
+{
+    bool absolute = !word.empty() && word[0] == '/';
+    string pattern = absolute ? word : cwd + "/" + word; // the engine never chdir()s: use the tab's cwd
+    vector<string> out;
+    glob_t g;
+    if (glob(pattern.c_str(), 0, nullptr, &g) == 0)
+        for (size_t i = 0; i < g.gl_pathc; i++)
+        {
+            string path = g.gl_pathv[i];
+            out.push_back(absolute ? path : path.substr(cwd.size() + 1)); // back to a relative name
+        }
+    globfree(&g);
+    if (out.empty())
+        out.push_back(word);
+    return out;
+}
+
 // raw wait status -> $? value
 static int decodeStatus(int st)
 {
@@ -165,6 +186,23 @@ void runCommand(const string &str, TerminalState &termState)
     if (toks.empty())
         return;
 
+    // "cmd &": a trailing & starts the command as a background job (the engine does not wait)
+    bool background = false;
+    string cmdText = str;
+    if (toks.back().isOp && toks.back().text == "&")
+    {
+        background = true;
+        toks.pop_back();
+        if (toks.empty())
+        {
+            termState.appendOutput("terminator: syntax error near '&'\n");
+            termState.lastStatus = 2;
+            return;
+        }
+        cmdText = cmdText.substr(0, cmdText.find_last_of('&')); // "sleep 100 &" -> "sleep 100"
+        cmdText = cmdText.substr(0, cmdText.find_last_not_of(" \t") + 1);
+    }
+
     vector<CommandStage> stages;
     CommandStage currStage;
     for (size_t i = 0; i < toks.size(); i++)
@@ -181,6 +219,12 @@ void runCommand(const string &str, TerminalState &termState)
             }
             stages.push_back(currStage);
             currStage = CommandStage();
+        }
+        else if (t.isOp && t.text == "&") // only allowed at the very end
+        {
+            termState.appendOutput("terminator: syntax error near '&'\n");
+            termState.lastStatus = 2;
+            return;
         }
         else if (t.isOp) // < > >>
         {
@@ -200,7 +244,13 @@ void runCommand(const string &str, TerminalState &termState)
             i++; // skip the filename
         }
         else // a normal word
-            currStage.words.push_back(t.text);
+        {
+            if (!t.quoted && t.text.find_first_of("*?[") != string::npos)
+                for (const string &w : expandWildcards(t.text, termState.cwd))
+                    currStage.words.push_back(w);
+            else
+                currStage.words.push_back(t.text);
+        }
     }
     if (currStage.words.empty() && !stages.empty())
     {
@@ -304,6 +354,16 @@ void runCommand(const string &str, TerminalState &termState)
             return;
         }
     }
+
+    // never hand a command to bash/sh (course rule); the script interpreter (Task 11) is not built
+    for (CommandStage &stage : stages)
+        if (isShellInvocation(stage.words[0]))
+        {
+            termState.appendOutput("terminator: " + stage.words[0] +
+                                   ": running shell scripts is not supported (no shell is ever started)\n");
+            termState.lastStatus = 1;
+            return;
+        }
 
     auto resolve = [&](const string &f)
     { return f[0] == '/' ? f : termState.cwd + "/" + f; };
@@ -448,8 +508,20 @@ void runCommand(const string &str, TerminalState &termState)
     fg.pids = pids;
     fg.lastPid = pids.back();
     fg.status = 0;
-    fg.cmd = str;
+    fg.cmd = cmdText;
     fg.stopped = false;
+
+    if (background) // "cmd &": record it as a running job and return at once, like bash
+    {
+        if (termState.jobs.empty())
+            termState.nextJobId = 1;
+        fg.id = termState.nextJobId++;
+        termState.jobs.push_back(fg);
+        termState.appendOutput("[" + to_string(fg.id) + "] " + to_string(pids.back()) + "\n");
+        termState.lastStatus = 0;
+        return;
+    }
+
     termState.sendCtl("B " + to_string(pgid)); // GUI: send Ctrl+C / Ctrl+Z to this group
     waitForeground(termState, fg);             // the engine waits; the GUI keeps running
 }

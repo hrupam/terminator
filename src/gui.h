@@ -2,6 +2,7 @@
 #include <X11/Xlib.h>
 #include <utility>
 #include <vector>
+#include <string>
 
 #define TABHEIGHT 2 // rows reserved at the top for the tab bar
 
@@ -12,6 +13,8 @@ extern XFontStruct *font;
 extern unsigned int width, height;
 extern unsigned long bgColor, fgColor, accentColor, dimColor;
 extern Atom wmDeleteMessage;
+extern Atom clipboardAtom, utf8Atom, targetsAtom, pasteProp; // X11 names used for copy/paste
+extern std::string clipboardText;                            // what we offer while we own CLIPBOARD
 
 extern std::vector<std::pair<int, int>> tabBounds;      // x start / x end of each tab label, filled in redraw
 extern std::vector<std::pair<int, int>> tabCloseBounds; // x start / x end of each tab's [x]
